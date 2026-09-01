@@ -1,0 +1,28 @@
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask3"
+  #WEIGHTS: "pretrain/MobileViG/MobileViG_M_80_7.pth.tar"
+  BACKBONE:
+     NAME: "build_fcos_cspvigm_bifpn_backbone"   #
+  #MOBILENET: True
+  RESNETS:
+     DEPTH: 50
+  BiFPN:
+    NUM_REPEATS: 6
+    NORM: "GN"
+  BASIS_MODULE:
+    NUM_CLASSES: 17
+  FCOS:
+    NUM_CLASSES: 17
+DATASETS:
+  TRAIN: ("Plantv2_train",)   #
+  TEST: ("Plantv2_val",)       #
+SOLVER: 
+  STEPS: (60000,80000)   
+  MAX_ITER: 90000
+  IMS_PER_BATCH: 6
+  BASE_LR: 0.001  # Note that RetinaNet uses a different default learning rate
+  CHECKPOINT_PERIOD: 90000
+TEST:
+  EVAL_PERIOD: 5000
+OUTPUT_DIR: "output/blendmask/Plantv2/csp"
