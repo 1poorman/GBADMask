@@ -1,0 +1,51 @@
+# coco128-seg 冒烟测试配置：BlendMask + MobileViG + BiFPN
+#
+# 用途：用小规模公开数据集验证整条训练链路能否跑通（数据加载 → 前向 → 反向 →
+# 评估）。数据集为 Ultralytics 的 coco128-seg（128 张 COCO 原图，已转成 COCO
+# instances 格式），由 datasets/prepare_coco_seg.py 生成。
+#
+# 128 张图远不足以训练出可用模型，这里只验证流程，不做精度评估。
+#
+# 用法:
+#   conda activate gbadmask
+#   cd /home/huachenghao/codes/GBADMask
+#   export GBADMASK_DATA_ROOT=$PWD/datasets/coco128-seg
+#   CUDA_VISIBLE_DEVICES=1 python tools/train_bl+.py \
+#       --config-file configs/run-coco128-test.yaml --num-gpus 1
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  BACKBONE:
+    NAME: "build_fcos_cspvig_bifpn_backbone"
+  VIG:
+    USE_LSK: False         # MobileViG 不支持 LSK
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    NUM_REPEATS: 3         # 基线是 6，小数据集上降到 3 提速
+    NORM: "GN"
+  BASIS_MODULE:
+    NAME: "ProtoNetV2"     # 改进版 basis 模块
+    ATTN: "gc"
+    # 数据集无 thing_train2017/*.npz 语义监督，必须关闭
+    LOSS_ON: False
+    NUM_CLASSES: 71        # 与数据集 categories 数量一致（含 2 个占位）
+  FCOS:
+    NUM_CLASSES: 71
+DATASETS:
+  TRAIN: ("coco128-seg_train",)
+  TEST: ("coco128-seg_val",)
+SOLVER:
+  IMS_PER_BATCH: 2         # 单卡 3090，显存留余量
+  BASE_LR: 0.0005          # 小 batch 从低学习率起步，避免发散
+  STEPS: (300, 500)        # 仅作流程验证，跑很少的迭代
+  MAX_ITER: 600
+  WARMUP_ITERS: 50
+  CHECKPOINT_PERIOD: 300
+INPUT:
+  MIN_SIZE_TRAIN: (320, 384, 448, 512)
+  MIN_SIZE_TEST: 512
+  MAX_SIZE_TRAIN: 640
+  MAX_SIZE_TEST: 640
+TEST:
+  EVAL_PERIOD: 300
+OUTPUT_DIR: "output/coco128-test"

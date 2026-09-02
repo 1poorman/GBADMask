@@ -1,26 +1,35 @@
 # SCBlendMask+：BlendMask + Lcspvig（MobileViG + LSK 大核选择注意力）+ BiFPN
 #
-# 与 run-BlendMask+.yaml 的唯一区别是骨干换成 adet/modeling/backbone/Lcspvig.py。
-# ⚠️ 已知问题：Lcspvig.py 里的 LSKblock / BN_LSKb_act 定义后并未被 MobileViG.forward
-#    调用，因此当前该配置与 run-BlendMask+.yaml 实际等价。
-#    真正启用 LSK 需先改 Lcspvig.MobileViG（见 README 第 9 节 P2-9）。
+# 与 run-BlendMask2-vig.yaml 构成骨干消融对 —— 两者唯一区别是 backbone：
+#   run-BlendMask2-vig.yaml → MobileViG（cspvig）
+#   本文件               → Lcspvig（MobileViG + LSK 大核选择注意力）
+#
+# LSK 说明：Lcspvig 的 4 个 stage transition 层由 Conv-BN-Hardswish 换成
+#   Conv → LSKblock → BN → Hardswish，使每个尺度输出前先做一次空间选择性大核加权。
+#   用 MODEL.VIG.USE_LSK: False 可退回无 LSK 版本，用于消融验证 LSK 本身的收益。
+#   参数量：cspvig 4.14M → Lcspvig 4.53M（+0.39M）。
 #
 # 数据集：DATASETS.TRAIN 只是"注册名"，磁盘路径由环境变量 GBADMASK_DATA_ROOT 指定，
 #   默认 <项目根>/datasets/<数据集名>。详见 README 第 6 节。
 _BASE_: "Base-BlendMask-BiFPN.yaml"
 MODEL:
-  # "BlendMask2" = 改进版 basis 模块（低层特征 + GCNet 全局上下文融合 + Focal-Dice-CE）
-  # 区别于 "BlendMask"（官方 ProtoNet），对应 adet/modeling/blendmask/basis_module2.py
+  # basis 模块改由 MODEL.BASIS_MODULE.NAME 选择：
+  #   "ProtoNet"   = 官方实现
+  #   "ProtoNetV2" = 改进版（低层特征 + 注意力融合 + Focal-Dice-CE）
+  # 这里沿用旧写法 BlendMask2（等价于 BlendMask），仅为向后兼容。
   META_ARCHITECTURE: "BlendMask2"
   # WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"   # 仅 ResNet 适用，ViG 无效
   BACKBONE:
     NAME: "build_fcos_Lcspvig_bifpn_backbone"   # Lcspvig + BiFPN
+  VIG:
+    USE_LSK: True          # 设为 False 则退化为普通 cspvig，用于消融
   BiFPN:
     IN_FEATURES: ["res3", "res4", "res5"]
     NUM_REPEATS: 6
     NORM: "GN"
   BASIS_MODULE:
-    NAME: "ProtoNet"         # 由 build_basis_module2 在 BASIS_MODULE2 registry 中查找
+    NAME: "ProtoNetV2"     # 改进版 basis 模块（见 adet/modeling/blendmask/basis_module2.py）
+    ATTN: "gc"             # none / gc / cbam / ca
     # base 里是 True；自定义数据集没有 thing_train2017/*.npz，必须显式关掉
     LOSS_ON: False
     NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（辅助语义头，代码内部会 +1）
@@ -28,7 +37,7 @@ MODEL:
   FCOS:
     NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（前景类，不含背景）
 DATASETS:
-  TRAIN: ("Plantv2_train",)   # 需在 tools/train_scbl+.py 的 PREDEFINED_SPLITS_DATASET 中注册
+  TRAIN: ("Plantv2_train",)   # 需在 tools/train_scbl_plus.py 的 PREDEFINED_SPLITS_DATASET 中注册
   TEST: ("Plantv2_val",)
 SOLVER:
   STEPS: (60000,80000)
