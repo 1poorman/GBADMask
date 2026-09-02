@@ -166,8 +166,18 @@ _C.MODEL.VIG.USE_LSK = True
 _C.MODEL.BASIS_MODULE = CN()
 _C.MODEL.BASIS_MODULE.NAME = "ProtoNet"
 # basis 模块内部使用的注意力类型，仅 ProtoNetV2 支持。
-# 可选: "none"（不加注意力）, "gc"（GCNet 全局上下文）, "cbam", "ca"（Coordinate Attention）
+# 可选: "none"（不加注意力）, "gc"（GCNet 通道注意力）, "cbam"（通道+空间）,
+#       "ca"（Coordinate Attention）, "spatial"（纯空间注意力）
+# gc 与 spatial 构成对照，用于判断 bases 更需要通道还是空间能力。
 _C.MODEL.BASIS_MODULE.ATTN = "gc"
+# 是否给 bases 输入拼接 2 通道归一化相对坐标图（CondInst 验证过的技巧）。
+# bases 是全图共享的位置无关原型，加坐标图可显式提供空间信息。
+_C.MODEL.BASIS_MODULE.COORD_ON = False
+# basis 语义监督的来源（仅 BASIS_MODULE.LOSS_ON=True 时用到）：
+#   "npz"    -- 只从预生成的 thing_train2017/*.npz 读取（官方行为）
+#   "auto"   -- 优先 npz，不存在时从 gt_masks 在线合成（默认）
+#   "online" -- 始终在线合成，完全不依赖 npz
+_C.MODEL.BASIS_MODULE.SEM_SOURCE = "auto"
 # ProtoNetV2 中低层细节分支的通道数（拼接回主干前会被降维）
 _C.MODEL.BASIS_MODULE.LOW_LEVEL_DIM = 24
 _C.MODEL.BASIS_MODULE.NUM_BASES = 4

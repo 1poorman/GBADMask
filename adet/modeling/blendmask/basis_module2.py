@@ -7,7 +7,8 @@ from detectron2.layers import ShapeSpec
 
 from adet.layers import conv_with_kaiming_uniform
 
-from .basis_module import BASIS_MODULE_REGISTRY, build_attention
+from .basis_module import (BASIS_MODULE_REGISTRY, AddCoord, add_coord_features,
+                           build_attention)
 from .fdc_loss import DC_and_CE_loss
 
 __all__ = ["ProtoNetV2", "build_basis_module2"]
@@ -54,6 +55,7 @@ class ProtoNetV2(nn.Module):
         self.visualize = cfg.MODEL.BLENDMASK.VISUALIZE
         attn           = cfg.MODEL.BASIS_MODULE.ATTN
         low_dim        = cfg.MODEL.BASIS_MODULE.LOW_LEVEL_DIM
+        self.coord_on  = cfg.MODEL.BASIS_MODULE.COORD_ON
         # fmt: on
 
         feature_channels = {k: v.channels for k, v in input_shape.items()}
@@ -67,7 +69,11 @@ class ProtoNetV2(nn.Module):
         self.attn_low = build_attention(attn, low_dim)
         self.attn_tower = build_attention(attn, planes)
 
-        self.dc_ce_loss = DC_and_CE_loss()
+        # do_bg=False：实例分割里背景像素远多于前景，若把背景计入 Dice，
+        # 损失会被背景主导（背景几乎总是能预测对，Dice 接近 1，梯度消失）。
+        # 排除背景后，Dice 才真正反映前景器官/病斑的分割质量。
+        self.dc_ce_loss = DC_and_CE_loss(
+            soft_dice_kwargs={"do_bg": False})
 
         conv_block = conv_with_kaiming_uniform(norm, True)  # conv relu bn
         self.concat = conv_block(planes + low_dim, planes, 3, 1)
@@ -82,8 +88,14 @@ class ProtoNetV2(nn.Module):
             self.refine.append(conv_block(
                 feature_channels[in_feature], planes, 3, 1))
 
+        # 顺序：attn_tower →（可选）拼接坐标 → conv 堆叠 → 上采样 → conv
+        # 坐标拼接后通道数 +2，因此紧随其后的 conv 输入也要 +2
         tower = [self.attn_tower]
-        for i in range(num_convs):
+        tower_in = planes + 2 if self.coord_on else planes
+        if self.coord_on:
+            tower.append(AddCoord())
+        tower.append(conv_block(tower_in, planes, 3, 1))
+        for i in range(1, num_convs):
             tower.append(conv_block(planes, planes, 3, 1))
         tower.append(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False))
@@ -131,9 +143,11 @@ class ProtoNetV2(nn.Module):
         losses = {}
         if self.training and self.loss_on:
             sem_out = self.seg_head(features[self.in_features[0]])
-            # resize target to reduce memory
+            # 同 basis_module.ProtoNet：直接对齐到 sem_out 的空间尺寸，
+            # 不依赖 COMMON_STRIDE（避免配置与实际分辨率不符导致尺寸错误）。
             gt_sem = targets.unsqueeze(1).float()
-            gt_sem = F.interpolate(gt_sem, scale_factor=1 / self.common_stride)
+            gt_sem = F.interpolate(gt_sem, size=sem_out.shape[-2:],
+                                   mode="nearest")
             seg_loss = self.dc_ce_loss(sem_out, gt_sem.squeeze(1).long())
             losses['loss_basis_sem'] = seg_loss * self.sem_loss_weight
         elif self.visualize and hasattr(self, "seg_head"):
