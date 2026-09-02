@@ -102,8 +102,14 @@ def setup_env(devices="0,1,2"):
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", devices)
     # OMP 与 libiomp 冲突时会让进程直接 abort，必须允许重复加载
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-    # 输入尺寸固定（detectron2 会按 MIN/MAX_SIZE 缩放），开 benchmark 更快
-    torch.backends.cudnn.benchmark = True
+    # 注意：这里不再无条件开启 cudnn.benchmark。
+    #
+    # benchmark=True 会为每种输入尺寸在运行时探测最快的卷积算法：
+    #   1) 多尺度训练（MIN_SIZE_TRAIN 有多个取值）时尺寸并不固定，
+    #      每次遇到新尺寸都要重新探测，反而更慢；
+    #   2) 探测结果依赖运行时状态，会让结果不可复现 —— 实测同配置两次
+    #      训练的 AP 差可达 1.7，导致消融结论不可信。
+    # 是否开启交由调用方按 cfg.CUDNN_BENCHMARK 决定（见各脚本的 setup()）。
 
 
 # --------------------------------------------------------------------------

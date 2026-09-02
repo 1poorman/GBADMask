@@ -38,6 +38,9 @@ import logging
 import os
 import sys
 from collections import OrderedDict
+
+import torch
+
 import detectron2.utils.comm as comm
 from detectron2.data import MetadataCatalog, build_detection_train_loader
 from detectron2.engine import DefaultTrainer
@@ -234,6 +237,9 @@ def setup(args):
 
     cfg.freeze()
     default_setup(cfg, args)
+    # cudnn 行为统一由配置决定（默认关闭，保证可复现）。
+    # 想压榨最后一点速度时再开：... CUDNN_BENCHMARK True
+    torch.backends.cudnn.benchmark = cfg.CUDNN_BENCHMARK
 
     rank = comm.get_rank()
     setup_logger(cfg.OUTPUT_DIR, distributed_rank=rank, name="adet")
