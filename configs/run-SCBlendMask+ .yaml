@@ -1,27 +1,41 @@
+# SCBlendMask+：BlendMask + Lcspvig（MobileViG + LSK 大核选择注意力）+ BiFPN
+#
+# 与 run-BlendMask+.yaml 的唯一区别是骨干换成 adet/modeling/backbone/Lcspvig.py。
+# ⚠️ 已知问题：Lcspvig.py 里的 LSKblock / BN_LSKb_act 定义后并未被 MobileViG.forward
+#    调用，因此当前该配置与 run-BlendMask+.yaml 实际等价。
+#    真正启用 LSK 需先改 Lcspvig.MobileViG（见 README 第 9 节 P2-9）。
+#
+# 数据集：DATASETS.TRAIN 只是"注册名"，磁盘路径由环境变量 GBADMASK_DATA_ROOT 指定，
+#   默认 <项目根>/datasets/<数据集名>。详见 README 第 6 节。
 _BASE_: "Base-BlendMask-BiFPN.yaml"
 MODEL:
+  # "BlendMask2" = 改进版 basis 模块（低层特征 + GCNet 全局上下文融合 + Focal-Dice-CE）
+  # 区别于 "BlendMask"（官方 ProtoNet），对应 adet/modeling/blendmask/basis_module2.py
   META_ARCHITECTURE: "BlendMask2"
-  #WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  # WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"   # 仅 ResNet 适用，ViG 无效
   BACKBONE:
-    NAME: "build_fcos_Lcsp_vig_bifpn_backbone"   #
-  RESNETS:
-    DEPTH: 50
+    NAME: "build_fcos_Lcspvig_bifpn_backbone"   # Lcspvig + BiFPN
   BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
     NUM_REPEATS: 6
     NORM: "GN"
   BASIS_MODULE:
-    NUM_CLASSES: 17
+    NAME: "ProtoNet"         # 由 build_basis_module2 在 BASIS_MODULE2 registry 中查找
+    # base 里是 True；自定义数据集没有 thing_train2017/*.npz，必须显式关掉
+    LOSS_ON: False
+    NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（辅助语义头，代码内部会 +1）
+    LOSS_WEIGHT: 0.3    # 语义辅助损失权重；开启 LOSS_ON 时才用到
   FCOS:
-    NUM_CLASSES: 17
+    NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（前景类，不含背景）
 DATASETS:
-  TRAIN: ("Plantv2_train",)   #
-  TEST: ("Plantv2_val",)       #
-SOLVER: 
+  TRAIN: ("Plantv2_train",)   # 需在 tools/train_scbl+.py 的 PREDEFINED_SPLITS_DATASET 中注册
+  TEST: ("Plantv2_val",)
+SOLVER:
   STEPS: (60000,80000)
   MAX_ITER: 90000
-  IMS_PER_BATCH: 6
-  BASE_LR: 0.001  # Note that RetinaNet uses a different default learning rate
+  IMS_PER_BATCH: 6     # 原服务器调参值；换卡后请按 实际总batch/16 * 0.01 重算 BASE_LR
+  BASE_LR: 0.001       # Note that RetinaNet uses a different default learning rate
   CHECKPOINT_PERIOD: 30000
 TEST:
   EVAL_PERIOD: 5000
-OUTPUT_DIR: "output/SCblendmask+/Plantv2/"
+OUTPUT_DIR: "output/SCblendmask-plus/Plantv2"

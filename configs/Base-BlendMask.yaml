@@ -1,5 +1,14 @@
+# 官方 BlendMask 基线：ResNet + FPN（COCO）
+#
+# 本文件为上游 AdelaiDet 原始配置，未作结构性改动，仅补充注释。
+# 作为 configs/run-*.yaml 的 _BASE_ 使用；自定义数据集请继承后在子配置里覆盖。
+#
+# 注意：BASIS_MODULE.LOSS_ON: True 会启用 basis 语义辅助损失，
+# 需要数据集额外提供 thing_train2017/*.npz 监督
+# （见 adet/data/dataset_mapper.py:195-214）。
+# COCO 需要先用官方脚本预生成；自定义数据集（草莓 / 植株）请在子配置里显式设为 False。
 MODEL:
-  META_ARCHITECTURE: "BlendMask"
+  META_ARCHITECTURE: "BlendMask"   # 注册名只有 "BlendMask"（"BlendMask1" 为不可用实验代码）
   MASK_ON: True
   BACKBONE:
     NAME: "build_fcos_resnet_fpn_backbone"
@@ -10,7 +19,7 @@ MODEL:
   PROPOSAL_GENERATOR:
     NAME: "FCOS"
   BASIS_MODULE:
-    LOSS_ON: True
+    LOSS_ON: True                  # 仅 COCO（已有 thing_train2017）可开
   PANOPTIC_FPN:
     COMBINE:
       ENABLED: False
@@ -18,12 +27,12 @@ MODEL:
     THRESH_WITH_CTR: True
     USE_SCALE: False
 DATASETS:
-  TRAIN: ("coco_2017_train",)
+  TRAIN: ("coco_2017_train",)      # 需 datasets/coco 存在并被注册
   TEST: ("coco_2017_val",)
 SOLVER:
-  IMS_PER_BATCH: 16
+  IMS_PER_BATCH: 16                # 8 卡配置，单卡请按比例下调并同步缩放 BASE_LR
   BASE_LR: 0.01  # Note that RetinaNet uses a different default learning rate
-  STEPS: (60000, 80000)
+  STEPS: (60000, 80000)            # COCO 3x schedule
   MAX_ITER: 90000
 INPUT:
   MIN_SIZE_TRAIN: (640, 672, 704, 736, 768, 800)

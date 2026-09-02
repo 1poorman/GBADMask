@@ -1,0 +1,50 @@
+# GBADMask 完整版：BlendMask2 + MobileViG(ViG 图卷积骨干) + BiFPN
+#
+# 与 run-vig.yaml 构成消融对 —— 两者唯一区别是 META_ARCHITECTURE：
+#   run-vig.yaml          → "BlendMask"   官方 ProtoNet + 官方 CrossEntropy 语义损失
+#   run-BlendMask2-vig.yaml → "BlendMask2"  basis_module2.ProtoNet
+#                              = 低层特征 + GCNet 全局上下文融合 + Focal-Dice-CE 混合损失
+#
+# Meta 架构与 basis 模块的对应关系（见 adet/modeling/blendmask/）：
+#   BlendMask  → basis_module.build_basis_module  → basis_module.ProtoNet   （官方）
+#   BlendMask2 → basis_module2.build_basis_module2 → basis_module2.ProtoNet （本项目改进）
+# 两者都通过 MODEL.BASIS_MODULE.NAME 选 registry 中的 ProtoNet，默认 "ProtoNet"。
+#
+# ⚠️ 注意：改进版 ProtoNet 的 Focal-Dice-CE 损失只在 BASIS_MODULE.LOSS_ON=True 时生效，
+#    而 LOSS_ON=True 需要数据集额外提供 thing_train2017/*.npz 的 basis 语义监督
+#    （见 adet/data/dataset_mapper.py:195-214）。
+#    自定义数据集上 LOSS_ON=False，此时生效的只有 GC 特征融合这一项。
+#
+# 数据集：DATASETS.TRAIN 只是"注册名"，磁盘路径由环境变量 GBADMASK_DATA_ROOT 指定，
+#   默认 <项目根>/datasets/<数据集名>。详见 README 第 6 节。
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask2"    # 改进版 basis 模块（GC 全局上下文 + FDC 损失）
+  # MobileViG 的 ImageNet 预训练权重（需自行下载并转换 key 后启用）
+  # WEIGHTS: "pretrain/MobileViG/MobileViG_M_80_7.pth.tar"
+  BACKBONE:
+    NAME: "build_fcos_cspvig_bifpn_backbone"   # MobileViG + BiFPN
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]      # ViG 输出 res2~res5 = 42/84/224/400 通道
+    NUM_REPEATS: 6
+    NORM: "GN"
+  BASIS_MODULE:
+    NAME: "ProtoNet"                # 由 build_basis_module2 在 BASIS_MODULE2 registry 中查找
+    # base 里是 True；自定义数据集没有 thing_train2017/*.npz，必须显式关掉
+    LOSS_ON: False
+    NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（辅助语义头，代码内部会 +1）
+    LOSS_WEIGHT: 0.3    # 语义辅助损失权重；开启 LOSS_ON 时才用到
+  FCOS:
+    NUM_CLASSES: 17     # 必须 = 数据集 categories 数量（前景类，不含背景）
+DATASETS:
+  TRAIN: ("Plantv2_train",)   # 需在 tools/train_bl+.py 的 PREDEFINED_SPLITS_DATASET 中注册
+  TEST: ("Plantv2_val",)
+SOLVER:
+  STEPS: (60000,80000)
+  MAX_ITER: 90000
+  IMS_PER_BATCH: 6     # 原服务器调参值；换卡后请按 实际总batch/16 * 0.01 重算 BASE_LR
+  BASE_LR: 0.001       # Note that RetinaNet uses a different default learning rate
+  CHECKPOINT_PERIOD: 30000
+TEST:
+  EVAL_PERIOD: 5000
+OUTPUT_DIR: "output/blendmask2-vig/Plantv2"
