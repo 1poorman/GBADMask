@@ -2,6 +2,7 @@ import copy
 import logging
 import os.path as osp
 
+import cv2
 import numpy as np
 import torch
 from fvcore.common.file_io import PathManager
@@ -79,6 +80,10 @@ class DatasetMapperWithBasis(DatasetMapper):
 
         self.basis_loss_on = cfg.MODEL.BASIS_MODULE.LOSS_ON
         self.ann_set = cfg.MODEL.BASIS_MODULE.ANN_SET
+        # "npz"  : 只从预生成的 thing_train2017/*.npz 读取（官方行为，自定义数据集没有）
+        # "auto" : 优先 npz，不存在时从当前图的 gt_masks 在线合成
+        # "online": 始终在线合成，完全不依赖 npz
+        self.basis_sem_source = cfg.MODEL.BASIS_MODULE.SEM_SOURCE
         self.boxinst_enabled = cfg.MODEL.BOXINST.ENABLED
 
         if self.boxinst_enabled:
@@ -193,23 +198,83 @@ class DatasetMapperWithBasis(DatasetMapper):
             dataset_dict["instances"] = utils.filter_empty_instances(instances)
 
         if self.basis_loss_on and self.is_train:
-            # load basis supervisions
-            if self.ann_set == "coco":
-                basis_sem_path = (
-                    dataset_dict["file_name"]
-                    .replace("train2017", "thing_train2017")
-                    .replace("image/train", "thing_train")
-                )
-            else:
-                basis_sem_path = (
-                    dataset_dict["file_name"]
-                    .replace("coco", "lvis")
-                    .replace("train2017", "thing_train")
-                )
-            # change extension to npz
-            basis_sem_path = osp.splitext(basis_sem_path)[0] + ".npz"
-            basis_sem_gt = np.load(basis_sem_path)["mask"]
-            basis_sem_gt = transforms.apply_segmentation(basis_sem_gt)
-            basis_sem_gt = torch.as_tensor(basis_sem_gt.astype("long"))
-            dataset_dict["basis_sem"] = basis_sem_gt
+            basis_sem_gt = self._load_basis_sem(dataset_dict)
+            if basis_sem_gt is None:
+                # 从当前图的实例掩膜在线合成语义标签
+                basis_sem_gt = self._make_basis_sem_from_instances(dataset_dict)
+            if basis_sem_gt is not None:
+                dataset_dict["basis_sem"] = basis_sem_gt
         return dataset_dict
+
+    def _load_basis_sem(self, dataset_dict):
+        """从预生成的 npz 读取 basis 语义标签，不存在时返回 None。"""
+        if self.basis_sem_source == "online":
+            return None
+        if self.ann_set == "coco":
+            basis_sem_path = (
+                dataset_dict["file_name"]
+                .replace("train2017", "thing_train2017")
+                .replace("image/train", "thing_train")
+            )
+        else:
+            basis_sem_path = (
+                dataset_dict["file_name"]
+                .replace("coco", "lvis")
+                .replace("train2017", "thing_train")
+            )
+        basis_sem_path = osp.splitext(basis_sem_path)[0] + ".npz"
+        if not osp.isfile(basis_sem_path):
+            return None
+        basis_sem_gt = np.load(basis_sem_path)["mask"]
+        basis_sem_gt = transforms.apply_segmentation(basis_sem_gt)
+        return torch.as_tensor(basis_sem_gt.astype("long"))
+
+    @staticmethod
+    def _make_basis_sem_from_instances(dataset_dict):
+        """从 gt_masks 在线合成 basis 语义标签图。
+
+        官方实现要求预先把 COCO 的 instance mask 烘成 ``thing_train2017/*.npz``，
+        自定义数据集（小麦病害等）没有这一步，导致 ``BASIS_MODULE.LOSS_ON`` 只能关
+        掉，basis module 的语义辅助损失（本项目为 Focal-Dice-CE）完全不参与训练。
+
+        这里直接从 dataloader 已有的 ``instances.gt_masks`` 合成：把每个实例掩膜
+        覆盖的像素标为 ``类别 id + 1``（0 保留给背景），与 COCO 语义标签的约定一致。
+        标注已过 transform，因此天然与增广同步，也无需额外磁盘空间。
+        """
+        instances = dataset_dict.get("instances")
+        if instances is None or not instances.has("gt_masks"):
+            return None
+        if len(instances) == 0:
+            return None
+
+        masks = instances.gt_masks
+        # BitMasks -> (N, H, W) bool；PolygonMasks 需先转成密集掩膜
+        from detectron2.structures import PolygonMasks
+        if hasattr(masks, "tensor"):                      # BitMasks
+            m = masks.tensor
+        elif isinstance(masks, PolygonMasks):
+            polys = masks.polygons          # N 个实例，每个是若干段 polygon
+            h, w = dataset_dict["height"], dataset_dict["width"]
+            dense = np.zeros((len(polys), h, w), dtype=np.uint8)
+            for i, parts in enumerate(polys):
+                for seg in parts:
+                    pts = np.asarray(seg, dtype=np.float64).reshape(-1, 2)
+                    if pts.shape[0] < 3:
+                        continue
+                    # 顶点需在图内，否则 fillPoly 会静默越界
+                    pts[:, 0] = np.clip(pts[:, 0], 0, w - 1)
+                    pts[:, 1] = np.clip(pts[:, 1], 0, h - 1)
+                    cv2.fillPoly(dense[i], [pts.astype(np.int32)], 1)
+            m = torch.as_tensor(dense, dtype=torch.bool)
+        else:
+            m = torch.as_tensor(np.asarray(masks), dtype=torch.bool)
+        if m.numel() == 0:
+            return None
+
+        h, w = m.shape[-2:]
+        sem = torch.zeros((h, w), dtype=torch.long, device=m.device)
+        classes = instances.gt_classes.to(m.device)
+        for i in range(m.shape[0]):
+            # 后写的覆盖先写的：COCO 语义分割标签的惯例（小物体后画）
+            sem[m[i]] = classes[i].long() + 1
+        return sem

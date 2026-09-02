@@ -137,13 +137,18 @@ class SoftDiceLoss(nn.Module):
         return -dc
     
 class DC_and_CE_loss(nn.Module):
-    def __init__(self,  gamma=0.75, weight=1, aggregate="sum"):  #soft_dice_kwargs, ce_kwargs,
+    def __init__(self,  gamma=0.75, weight=1, aggregate="sum",
+                 ce_kwargs=None, soft_dice_kwargs=None):
         super(DC_and_CE_loss, self).__init__()
         self.aggregate = aggregate
-        self.ce = CrossentropyND()#**ce_kwargs)
-        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper)#, **soft_dice_kwargs)
+        self.ce = CrossentropyND(**(ce_kwargs or {}))
+        # 默认 do_bg=True 是 nnUNet 的语义分割设定；实例分割前景像素稀少时
+        # 建议传 do_bg=False，否则 Dice 会被背景主导。
+        self.dc = SoftDiceLoss(apply_nonlin=softmax_helper,
+                               **(soft_dice_kwargs or {}))
         self.gamma = gamma
         self.weight = weight
+
     def forward(self, input, target):
         dc_loss = self.dc(input, target)
         ce_loss = self.ce(input, target)
