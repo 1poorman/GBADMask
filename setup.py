@@ -70,10 +70,11 @@ setup(
     description="AdelaiDet is AIM's research "
     "platform for instance-level detection tasks based on Detectron2.",
     packages=find_packages(exclude=("configs", "tests")),
-    python_requires=">=3.6",
+    python_requires=">=3.7",
     install_requires=[
         "termcolor>=1.1",
-        "Pillow>=6.0",
+        # detectron2 v0.6 用到 PIL.Image.LINEAR，Pillow 10+ 已移除该常量
+        "Pillow>=6.0,<10.0",
         "yacs>=0.1.6",
         "tabulate",
         "cloudpickle",
@@ -81,11 +82,20 @@ setup(
         "tqdm>4.29.0",
         "tensorboard",
         "rapidfuzz",
-        "Polygon3",
         "shapely",
-        "scikit-image"
+        # 本项目 backbone（cspvig / Lcspvig）依赖 timm 的 DropPath。
+        # timm 1.0 起移除了 timm.models.layers.ConvBnAct 等 API，必须锁 <1.0
+        "timm>=0.6.12,<1.0",
+        # detectron2 v0.6 的 config 依赖
+        "omegaconf",
+        # BAText 的语法解析依赖，需与 omegaconf 的传递依赖保持一致
+        "antlr4-python3-runtime==4.8",
     ],
-    extras_require={"all": ["psutil"]},
+    extras_require={
+        "all": ["psutil"],
+        # onnx/ 目录下的导出与推理脚本所需
+        "onnx": ["onnx", "onnxruntime"],
+    },
     ext_modules=get_extensions(),
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
 )
