@@ -9,7 +9,7 @@ from adet.layers import conv_with_kaiming_uniform
 
 from .basis_module import (BASIS_MODULE_REGISTRY, AddCoord, add_coord_features,
                            build_attention)
-from .fdc_loss import DC_and_CE_loss
+from .advanced_losses import BasisSemHeadWrapper, build_sem_loss
 
 __all__ = ["ProtoNetV2", "build_basis_module2"]
 
@@ -69,11 +69,11 @@ class ProtoNetV2(nn.Module):
         self.attn_low = build_attention(attn, low_dim)
         self.attn_tower = build_attention(attn, planes)
 
-        # do_bg=False：实例分割里背景像素远多于前景，若把背景计入 Dice，
-        # 损失会被背景主导（背景几乎总是能预测对，Dice 接近 1，梯度消失）。
-        # 排除背景后，Dice 才真正反映前景器官/病斑的分割质量。
-        self.dc_ce_loss = DC_and_CE_loss(
-            soft_dice_kwargs={"do_bg": False})
+        # 语义损失：可用 advanced_losses 里对前景更友好的版本。
+        # do_bg=False 是默认且关键的设定：前景像素远少于背景，若把背景计入，
+        # 损失会被背景主导（背景几乎总能预测对，梯度趋近于 0）。
+        self.dc_ce_loss = build_sem_loss(
+            cfg.MODEL.BASIS_MODULE.SEM_LOSS, do_bg=False)
 
         conv_block = conv_with_kaiming_uniform(norm, True)  # conv relu bn
         self.concat = conv_block(planes + low_dim, planes, 3, 1)
@@ -110,7 +110,7 @@ class ProtoNetV2(nn.Module):
             # fmt: on
 
             inplanes = feature_channels[self.in_features[0]]
-            self.seg_head = nn.Sequential(
+            head = nn.Sequential(
                 nn.Conv2d(inplanes, planes, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.BatchNorm2d(planes),
                 nn.ReLU(),
@@ -118,6 +118,10 @@ class ProtoNetV2(nn.Module):
                 nn.BatchNorm2d(planes),
                 nn.ReLU(),
                 nn.Conv2d(planes, num_classes, kernel_size=1, stride=1))
+            # SEM_DETACH=True 时截断梯度：语义损失只训 head，不回传 backbone，
+            # 避免语义分支把共享特征平滑化（那会损害 bases 所需的高频细节）。
+            self.seg_head = BasisSemHeadWrapper(
+                head, detach=cfg.MODEL.BASIS_MODULE.SEM_DETACH)
 
     def forward(self, features, targets=None):
         for i, f in enumerate(self.in_features):

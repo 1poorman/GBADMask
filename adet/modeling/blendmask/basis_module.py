@@ -12,6 +12,7 @@ from .ca import CA_Block
 from .cbam import CBAMLayer
 from .GCblock import GlobalContextBlock
 from .spatial_attn import SpatialAttention
+from .advanced_losses import BasisSemHeadWrapper, build_sem_loss
 
 
 BASIS_MODULE_REGISTRY = Registry("BASIS_MODULE")
@@ -147,16 +148,22 @@ class ProtoNet(nn.Module):
             # fmt: on
 
             inplanes = feature_channels[self.in_features[0]]
-            self.seg_head = nn.Sequential(nn.Conv2d(inplanes, planes, kernel_size=3,
-                                                    stride=1, padding=1, bias=False),
-                                          nn.BatchNorm2d(planes),
-                                          nn.ReLU(),
-                                          nn.Conv2d(planes, planes, kernel_size=3,
-                                                    stride=1, padding=1, bias=False),
-                                          nn.BatchNorm2d(planes),
-                                          nn.ReLU(),
-                                          nn.Conv2d(planes, num_classes, kernel_size=1,
-                                                    stride=1))
+            head = nn.Sequential(nn.Conv2d(inplanes, planes, kernel_size=3,
+                                          stride=1, padding=1, bias=False),
+                                 nn.BatchNorm2d(planes),
+                                 nn.ReLU(),
+                                 nn.Conv2d(planes, planes, kernel_size=3,
+                                           stride=1, padding=1, bias=False),
+                                 nn.BatchNorm2d(planes),
+                                 nn.ReLU(),
+                                 nn.Conv2d(planes, num_classes, kernel_size=1,
+                                           stride=1))
+            # 与 ProtoNetV2 保持一致：支持损失类型切换与梯度截断。
+            # 语义 loss 默认关闭（LOSS_ON=False），故不影响 base 组的基线可比性。
+            self.seg_head = BasisSemHeadWrapper(
+                head, detach=cfg.MODEL.BASIS_MODULE.SEM_DETACH)
+            self.sem_loss = build_sem_loss(
+                cfg.MODEL.BASIS_MODULE.SEM_LOSS, do_bg=False)
 
     def forward(self, features, targets=None):
         for i, f in enumerate(self.in_features):
@@ -182,7 +189,7 @@ class ProtoNet(nn.Module):
             gt_sem = targets.unsqueeze(1).float()
             gt_sem = F.interpolate(gt_sem, size=sem_out.shape[-2:],
                                    mode="nearest")
-            seg_loss = F.cross_entropy(
+            seg_loss = self.sem_loss(
                 sem_out, gt_sem.squeeze(1).long())
             losses['loss_basis_sem'] = seg_loss * self.sem_loss_weight
         elif self.visualize and hasattr(self, "seg_head"):

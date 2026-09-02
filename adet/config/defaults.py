@@ -159,6 +159,13 @@ _C.MODEL.VIG = CN()
 # 是否在 stage 的 transition 层启用 LSK 大核选择注意力（仅 Lcspvig 生效）。
 # 关闭后 Lcspvig 退化为 cspvig，便于两者的消融对比。
 _C.MODEL.VIG.USE_LSK = True
+# CSP 融合方式（cspvig / Lcspvig 均生效）：
+#   "c3"  -- 原实现：左半直通，右半串行，只用最后一个 block 的输出融合
+#   "c2f" -- YOLOv8 风格：每个 block 的输出都保留并 concat，梯度流更丰富
+_C.MODEL.VIG.CSP_STYLE = "c3"
+# bottleneck 中间深度卷积的 kernel size（C3K 风格）。
+# 3 = 原实现；5 / 7 可扩大感受野，对病斑这类区域型目标可能更有效。
+_C.MODEL.VIG.MID_KERNEL = 3
 
 # ---------------------------------------------------------------------------- #
 # Basis Module Options
@@ -178,6 +185,16 @@ _C.MODEL.BASIS_MODULE.COORD_ON = False
 #   "auto"   -- 优先 npz，不存在时从 gt_masks 在线合成（默认）
 #   "online" -- 始终在线合成，完全不依赖 npz
 _C.MODEL.BASIS_MODULE.SEM_SOURCE = "auto"
+# 语义辅助损失的类型（仅 LOSS_ON=True 时生效）：
+#   "ce"            -- 纯 CrossEntropy（官方 ProtoNet 用这个）
+#   "fdc"           -- Focal-Dice-CE（本项目原实现）
+#   "focal_tversky" -- Focal Tversky，可用 alpha/beta 分别控制 FP/FN 惩罚
+#   "unified_focal" -- Unified Focal Loss，Dice 系与 CE 系的统一形式
+_C.MODEL.BASIS_MODULE.SEM_LOSS = "fdc"
+# 是否截断语义损失回传 backbone 的梯度。
+# 实测语义监督会让 backbone 特征平滑化、损害 bases 所需的高频细节
+# （segm AP 6.797 -> 0.611），开启后语义损失只训练 head，不污染共享特征。
+_C.MODEL.BASIS_MODULE.SEM_DETACH = True
 # ProtoNetV2 中低层细节分支的通道数（拼接回主干前会被降维）
 _C.MODEL.BASIS_MODULE.LOW_LEVEL_DIM = 24
 _C.MODEL.BASIS_MODULE.NUM_BASES = 4
@@ -333,6 +350,15 @@ _C.MODEL.BiFPN.NUM_REPEATS = 6
 
 # Options: "" (no norm), "GN"
 _C.MODEL.BiFPN.NORM = ""
+# 上采样方式（跨尺度融合时把低分辨率特征放大）：
+#   "nearest"  -- 原始 BiFPN（EfficientDet）行为
+#   "dysample" -- DySample（ICLR 2024），为每个位置学习内容相关的采样偏移，
+#                 使跨尺度相加时空间对齐更准确，参数与计算开销极小
+_C.MODEL.BiFPN.UPSAMPLE = "nearest"
+# 融合后接的轻量注意力：
+#   "none" -- 不加（默认）
+#   "eca"  -- ECA，无降维的一维卷积通道注意力，参数量仅 kernel_size 个
+_C.MODEL.BiFPN.ATTN = "none"
 
 # ---------------------------------------------------------------------------- #
 # SOLOv2 Options
