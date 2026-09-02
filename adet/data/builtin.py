@@ -78,6 +78,20 @@ _PREDEFINED_SPLITS_WHEAT = {
         "HBueHxOW/wheat_seg/test2017",
         "HBueHxOW/wheat_seg/annotations/instances_test2017.json",
     ),
+    # 按内容 MD5 去重 + 移除类别冲突后的版本（818 张，无验证集泄漏）
+    # 由 prepare_wheat_seg_coco.py --dedup hash --drop-conflict 生成，见 DATA.md 第 7 节
+    "wheat_seg_clean_train": (
+        "HBueHxOW/wheat_seg_clean/train2017",
+        "HBueHxOW/wheat_seg_clean/annotations/instances_train2017.json",
+    ),
+    "wheat_seg_clean_val": (
+        "HBueHxOW/wheat_seg_clean/val2017",
+        "HBueHxOW/wheat_seg_clean/annotations/instances_val2017.json",
+    ),
+    "wheat_seg_clean_test": (
+        "HBueHxOW/wheat_seg_clean/test2017",
+        "HBueHxOW/wheat_seg_clean/annotations/instances_test2017.json",
+    ),
 }
 
 metadata_wheat = {
