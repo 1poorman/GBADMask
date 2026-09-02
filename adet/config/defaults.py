@@ -32,6 +32,17 @@ _C.INPUT.CROP.CROP_INSTANCE = True
 # _C.INPUT.CROP.ENABLED = False
 
 # ---------------------------------------------------------------------------- #
+# 数据集
+# ---------------------------------------------------------------------------- #
+# 数据集**名称**（不是路径）。非空时 tools/register_datasets.py 会自动
+#   * 在 datasets/ 下查找同名目录（含 HBueHxOW/wheat_seg 这类嵌套布局）
+#   * 注册 <NAME>_train / <NAME>_val / <NAME>_test
+#   * 把 DATASETS.TRAIN / DATASETS.TEST 指向 <NAME>_train / <NAME>_val
+# 效果等同于命令行 --dataset <NAME>，命令行优先级更高。
+# 留空则不改动 DATASETS.TRAIN/TEST，只按其注册名反推需要注册哪些数据集。
+_C.DATASETS.NAME = ""
+
+# ---------------------------------------------------------------------------- #
 # FCOS Head
 # ---------------------------------------------------------------------------- #
 _C.MODEL.FCOS = CN()

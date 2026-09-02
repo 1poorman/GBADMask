@@ -1,0 +1,63 @@
+# 小麦病害实例分割（wheat_seg）：BlendMask + MobileViG + BiFPN
+#
+# 演示「训练内容与数据集全部由 yaml 决定」的用法：
+#   * 数据集只写名字（DATASETS.NAME），磁盘路径由 tools/register_datasets.py 解析
+#   * 骨干 / basis 模块 / 注意力类型也是配置项，换实验不用改代码
+#
+# 数据集由 HBueHxOW 的 YOLO-seg 标注转换而来（datasets/prepare_wheat_seg_coco.py）：
+#   12 类（根冠腐烂/健康/叶锈/白粉/散黑穗/蚜虫/孢囊线虫/红蜘蛛/赤霉/纹枯/茎基腐/全蚀）
+#   train 631 张 / val 90 张 / test 178 张
+#
+# 用法:
+#   conda activate gbadmask
+#   cd /home/huachenghao/codes/GBADMask
+#   CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 python tools/train_bl+.py \
+#       --config-file configs/run-wheat-seg.yaml --num-gpus 1
+#
+#   换数据集只需一行（或命令行 --dataset coco128-seg）：
+#       DATASETS.NAME: "coco128-seg"      # 记得同步下面两个 NUM_CLASSES
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  BACKBONE:
+    NAME: "build_fcos_cspvig_bifpn_backbone"   # MobileViG + BiFPN
+  VIG:
+    USE_LSK: False         # LSK 仅 Lcspvig 支持，MobileViG 下该项无效
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    NUM_REPEATS: 6
+    NORM: "GN"
+  BASIS_MODULE:
+    NAME: "ProtoNetV2"     # ProtoNet=官方 / ProtoNetV2=改进版
+    ATTN: "gc"             # none / gc / cbam / ca
+    # 自定义数据集没有 thing_train2017/*.npz，必须显式关掉
+    LOSS_ON: False
+    NUM_CLASSES: 12        # = 数据集 categories 数量（辅助语义头，代码内部会 +1）
+  FCOS:
+    NUM_CLASSES: 12        # = 数据集 categories 数量（前景类，不含背景）
+DATASETS:
+  # 只写数据集名称：自动注册 wheat_seg_{train,val,test}，
+  # 并把 TRAIN/TEST 指向 wheat_seg_train / wheat_seg_val。
+  # 目录查找顺序见 tools/base.py:resolve_dataset_dir（支持 datasets/ 下的嵌套布局）。
+  NAME: "wheat_seg"
+
+  # 可以不写：NAME 非空时 TRAIN/TEST 会被自动填成 <NAME>_train / <NAME>_val。
+  # 若要自定义划分（例如用 train+val 训练、test 评估），就把 NAME 留空并显式写注册名：
+  #   NAME: ""
+  #   TRAIN: ("wheat_seg_train", "wheat_seg_val")
+  #   TEST:  ("wheat_seg_test",)
+SOLVER:
+  IMS_PER_BATCH: 4
+  BASE_LR: 0.0025        # 按 实际总batch/16 * 0.01 估算，单卡 3090 可跑
+  STEPS: (24000, 32000)
+  MAX_ITER: 36000
+  WARMUP_ITERS: 1000
+  CHECKPOINT_PERIOD: 5000
+INPUT:
+  MIN_SIZE_TRAIN: (512, 576, 640, 704, 768)
+  MIN_SIZE_TEST: 640
+  MAX_SIZE_TRAIN: 1024
+  MAX_SIZE_TEST: 1024
+TEST:
+  EVAL_PERIOD: 5000
+OUTPUT_DIR: "output/wheat_seg/blendmask2-vig"

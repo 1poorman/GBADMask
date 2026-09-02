@@ -13,17 +13,36 @@ For example, your research project perhaps only needs a single "evaluator".
 Therefore, we recommend you to use detectron2 as an library and take
 this file as an example of how to use the library.
 You may want to write your own script with your datasets and other customizations.
+
+数据集
+------
+本脚本**不含**任何路径与注册逻辑，统一由两个独立模块提供：
+
+* ``tools/base.py``            路径常量、环境变量、COCO 目录命名约定
+* ``tools/register_datasets.py`` 给数据集**名称**即可注册 ``<名称>_train/_val/_test``
+
+因此换数据集只需换一个名字，不用改代码::
+
+    # 列出可用数据集
+    python tools/train_bl+.py --list-datasets
+
+    # 用 wheat_seg 训练（自动注册并把 cfg.DATASETS 指过去）
+    python tools/train_bl+.py \
+        --config-file configs/run-wheat-seg.yaml --num-gpus 1 --dataset wheat_seg
+
+    # 不传 --dataset 时，按 config 里 DATASETS.TRAIN/TEST 的注册名反推并注册
+    python tools/train_bl+.py --config-file configs/run-BlendMask+.yaml --num-gpus 1
 """
 
 import logging
-import os, json, colorsys
+import os
+import sys
 from collections import OrderedDict
-import torch
-from torch.nn.parallel import DistributedDataParallel
-import numpy as np
 import detectron2.utils.comm as comm
-from detectron2.data import MetadataCatalog, build_detection_train_loader, DatasetCatalog
-from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
+from detectron2.data import MetadataCatalog, build_detection_train_loader
+from detectron2.engine import DefaultTrainer
+from detectron2.engine.defaults import default_argument_parser as d2_argument_parser
+from detectron2.engine import default_setup, hooks, launch
 from detectron2.utils.events import EventStorage
 from detectron2.evaluation import (
     COCOEvaluator,
@@ -36,108 +55,19 @@ from detectron2.evaluation import (
 )
 from detectron2.modeling import GeneralizedRCNNWithTTA
 from detectron2.utils.logger import setup_logger
-from detectron2.data.datasets.coco import load_coco_json
 
 from adet.data.dataset_mapper import DatasetMapperWithBasis
 from adet.config import get_cfg
 from adet.checkpoint import AdetCheckpointer
 from adet.evaluation import TextEvaluator
 
-# 不覆盖外部已设置的 CUDA_VISIBLE_DEVICES
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2")
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-torch.backends.cudnn.benchmark = True
+# 路径、环境变量、数据集注册都在独立模块里，本脚本只负责训练流程
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import base                                            # noqa: E402
+from base import setup_env, DATASETS_DIR               # noqa: E402
+from register_datasets import apply_dataset, list_datasets  # noqa: E402
 
-# 数据集路径
-# 磁盘路径不再硬编码到某一台服务器：优先读环境变量 GBADMASK_DATA_ROOT，
-# 未设置时回退到项目内的 datasets/Plantv2。目录结构见 README 第 6 节。
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATASET_ROOT = os.environ.get(
-    "GBADMASK_DATA_ROOT", os.path.join(_PROJECT_ROOT, "datasets", "Plantv2")
-)
-ANN_ROOT = os.path.join(DATASET_ROOT, 'annotations')
-TRAIN_PATH = os.path.join(DATASET_ROOT, 'train2017')   #train2017
-VAL_PATH = os.path.join(DATASET_ROOT, 'val2017')    #val2017
-TRAIN_JSON = os.path.join(ANN_ROOT, 'instances_train2017.json')       #
-VAL_JSON = os.path.join(ANN_ROOT, 'instances_val2017.json')          #
-
-
-def _build_splits():
-    """
-    purpose: 扫描 GBADMASK_DATA_ROOT 及其同级目录，返回可用的 COCO instances 数据集。
-             只做 os.path.isfile 检查，不读 json，因此数据未就绪时 import 不会失败。
-    """
-    splits = {}
-    abs_root = os.path.abspath(DATASET_ROOT)
-    for name in (os.path.basename(abs_root), "Strawberry"):
-        root = os.path.join(os.path.dirname(abs_root), name)
-        train_json = os.path.join(root, "annotations", "instances_train2017.json")
-        val_json = os.path.join(root, "annotations", "instances_val2017.json")
-        if os.path.isfile(train_json):
-            splits[name + "_train"] = (os.path.join(root, "train2017"), train_json)
-        if os.path.isfile(val_json):
-            splits[name + "_val"] = (os.path.join(root, "val2017"), val_json)
-    return splits
-
-
-# 数据集的子集
-# 注意：这里的数据集名字，需要更新到你的config文件中的 DATASETS 里.
-PREDEFINED_SPLITS_DATASET = _build_splits()
-
-
-def register_dataset():
-    """
-    purpose: register all splits of dataset with PREDEFINED_SPLITS_DATASET
-    """
-    for key, (image_root, json_file) in PREDEFINED_SPLITS_DATASET.items():
-        print('key:', key, 'image_root:', image_root, 'json_file:', json_file)
-        register_dataset_instances(name=key,
-                                   metadate=get_dataset_instances_meta(json_file),
-                                   json_file=json_file,
-                                   image_root=image_root)
-
-
-def get_dataset_instances_meta(json_file=TRAIN_JSON):
-    """
-    purpose: get metadata of dataset from DATASET_CATEGORIES
-    return: dict[metadata]
-    """
-    # 从 json 文件中读取类别（延迟加载，数据未就绪时不会在 import 阶段崩）
-    with open(json_file, 'r') as f:
-        DATASET_CATEGORIES = json.load(f)['categories']
-    N = len(DATASET_CATEGORIES)  ###number classes , ignore background
-    bright = True
-    brightness = 1.0 if bright else 0.7
-    hsv = [(i / N, 1, brightness) for i in range(N)]
-    colors = list(map(lambda c: colorsys.hsv_to_rgb(*c), hsv))
-    colors = (np.array(colors) * 255).astype('uint8')
-    for i, category_info in enumerate(DATASET_CATEGORIES):
-        category_info.update({"isthing": 1, "color": colors[i]})
-        DATASET_CATEGORIES[i] = category_info
-
-    thing_ids = [k["id"] for k in DATASET_CATEGORIES if k["isthing"] == 1]
-    thing_colors = [k["color"] for k in DATASET_CATEGORIES if k["isthing"] == 1]
-    # assert len(thing_ids) == 2, len(thing_ids)
-    thing_dataset_id_to_contiguous_id = {k: i for i, k in enumerate(thing_ids)}
-    thing_classes = [k["name"] for k in DATASET_CATEGORIES if k["isthing"] == 1]
-    ret = {
-        "thing_dataset_id_to_contiguous_id": thing_dataset_id_to_contiguous_id,
-        "thing_classes": thing_classes,
-        "thing_colors": thing_colors,
-    }
-    return ret
-
-
-def register_dataset_instances(name, metadate, json_file, image_root):
-    """
-    purpose: register dataset to DatasetCatalog,
-             register metadata to MetadataCatalog and set attribute
-    """
-    DatasetCatalog.register(name, lambda: load_coco_json(json_file, image_root, name))
-    MetadataCatalog.get(name).set(json_file=json_file,
-                                  image_root=image_root,
-                                  evaluator_type="coco",
-                                  **metadate)
+setup_env()
 
 
 class Trainer(DefaultTrainer):
@@ -276,6 +206,21 @@ class Trainer(DefaultTrainer):
         return res
 
 
+def build_argument_parser():
+    """在 detectron2 默认参数之上加数据集相关的两个选项。"""
+    parser = d2_argument_parser()
+    parser.add_argument(
+        "--dataset", default="",
+        help="数据集名称（如 wheat_seg）。注册 <名称>_train/_val/_test 并把 "
+             "cfg.DATASETS 指过去；留空则沿用 config 里 DATASETS 的注册名。",
+    )
+    parser.add_argument(
+        "--list-datasets", action="store_true",
+        help="列出 datasets/ 下可用的数据集名称后退出。",
+    )
+    return parser
+
+
 def setup(args):
     """
     Create configs and perform basic setups.
@@ -283,6 +228,10 @@ def setup(args):
     cfg = get_cfg()
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+
+    # 必须在 freeze 之前：--dataset 需要改写 cfg.DATASETS
+    apply_dataset(cfg, args.dataset)
+
     cfg.freeze()
     default_setup(cfg, args)
 
@@ -294,7 +243,6 @@ def setup(args):
 
 def main(args):
     cfg = setup(args)
-    register_dataset()
     if args.eval_only:
         model = Trainer.build_model(cfg)
         AdetCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
@@ -320,8 +268,18 @@ def main(args):
     return trainer.train()
 
 
-if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+def cli(argv=None):
+    """命令行入口。抽成函数，便于 ``train_scbl_plus.py`` 等兼容脚本直接复用。"""
+    args = build_argument_parser().parse_args(argv)
+    if args.list_datasets:
+        found = list_datasets()
+        print("{} 下可用的数据集:".format(DATASETS_DIR))
+        if not found:
+            print("  （无）先用 datasets/prepare_*.py 生成 COCO 格式数据")
+        for name in found:
+            print("  {:<16} {}".format(name, base.resolve_dataset_dir(name)))
+        return
+
     print("Command Line Args:", args)
     launch(
         main,
@@ -331,3 +289,7 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(args,),
     )
+
+
+if __name__ == "__main__":
+    cli()

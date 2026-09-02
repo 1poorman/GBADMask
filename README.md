@@ -232,19 +232,47 @@ configs/
 | `MODEL.FCOS.NUM_CLASSES` | 检测头前景类别数 | 必须 = 数据集类别数 |
 | `MODEL.FCOS.TOP_LEVELS` | BiFPN 额外生成的顶层数（p6/p7） | 默认 2 |
 
-### 4.2 数据集路径
+### 4.2 数据集配置
 
-> ⚠️ `configs/*.yaml` 里只保存**数据集的注册名**（如 `Plantv2_train`），
-> **真实磁盘路径不在 yaml 中**，而是写在 `tools/train_bl+.py` / `tools/train_scbl_plus.py` 顶部的
-> `DATASET_ROOT` 常量里。原先该值硬编码为另一台服务器的 `/mnt/cd/HCH/data/Plantv2/`。
+推荐只写**数据集名称**，磁盘路径由脚本自动解析：
 
-现已改为可通过环境变量覆盖：
+```yaml
+DATASETS:
+  NAME: "wheat_seg"     # 只写名字；自动注册 wheat_seg_{train,val,test}
+                        # 并把 TRAIN/TEST 指向 wheat_seg_train / wheat_seg_val
+```
+
+`NAME` 的目录查找顺序（`tools/base.py:resolve_dataset_dir`）：绝对路径 >
+`datasets/<名称>` > `GBADMASK_DATA_ROOT` 同级目录 > 扫描 `datasets/`
+（因此 `datasets/HBueHxOW/wheat_seg` 这类嵌套布局也能找到）。
+
+数据集来源优先级：**命令行 `--dataset <名称>`** > **配置 `DATASETS.NAME`** >
+`DATASETS.TRAIN/TEST` 注册名反推。前两者会覆盖 `TRAIN/TEST`；最后一种不改配置，
+只按其注册名反推需要注册哪些数据集。
+
+若需自定义划分（例如用 train+val 训练），把 `NAME` 留空并显式写注册名：
+
+```yaml
+DATASETS:
+  NAME: ""
+  TRAIN: ("wheat_seg_train", "wheat_seg_val")
+  TEST:  ("wheat_seg_test",)
+```
+
+> `MODEL.FCOS.NUM_CLASSES` 与 `MODEL.BASIS_MODULE.NUM_CLASSES` 必须等于数据集类别数。
+> 换数据集忘了改会在训练中途抛 CUDA index 越界，因此启动时若检测到不一致会先打出
+> WARNING 指明该改成多少（只提示，不改配置）。
+
+#### 环境变量
+
+需要指向非默认位置时可用环境变量覆盖：
 
 ```bash
 export GBADMASK_DATA_ROOT=/home/huachenghao/codes/GBADMask/datasets/Plantv2
 ```
 
-未设置时回退到项目内的 `datasets/Plantv2`。
+未设置且 `DATASETS.NAME` 也为空时，回退到项目内的 `datasets/Plantv2`。
+有了 `DATASETS.NAME` 后一般不再需要设它。
 
 ---
 
@@ -423,6 +451,37 @@ CUDA_VISIBLE_DEVICES=1 python tools/train_bl+.py \
 > 网络受限时 `images.cocodataset.org` 与 GitHub 常不可达，`ultralytics.com` 通常可用
 > （实测约 100~675 KB/s）。
 
+### 6.3 小麦病害分割数据集（wheat_seg）
+
+`datasets/HBueHxOW/` 下有三份内容，只有 `zzy_dataset` 带分割标注：
+
+| 目录 | 内容 | 是否可用 |
+| --- | --- | --- |
+| `zzy_dataset/` | YOLO-seg，`images/{train,val,test}` + `labels/{train,val,test}`，905 张图 | ✅ 转换源 |
+| `zzy_wheat/` | 同批图的 LabelMe 源标注，用于核对类别名 | ✅ 辅助 |
+| `wheatData_split910/` | 12 类文件夹、7653 张图的**纯分类**数据，**无 mask** | ❌ 跳过 |
+
+```bash
+cd /home/huachenghao/codes/GBADMask
+
+# 转换（默认用相对软链接引用图片，省 458 MB；--copy 可改为复制）
+python datasets/prepare_wheat_seg_coco.py
+#   -> datasets/HBueHxOW/wheat_seg/{annotations,train2017,val2017,test2017}
+#      train 631 张/1601 实例，val 90/261，test 178/429，12 类
+
+# 训练（数据集名已写在 yaml 的 DATASETS.NAME 里，无需环境变量）
+CUDA_VISIBLE_DEVICES=1 OMP_NUM_THREADS=1 python tools/train_bl+.py \
+    --config-file configs/run-wheat-seg.yaml --num-gpus 1
+```
+
+12 个类别（YOLO `class_id` 顺序，COCO `category_id` 从 1 起）：
+根冠腐烂 / 健康小麦 / 叶锈病 / 白粉病 / 散黑穗病 / 蚜虫病 / 孢囊线虫病 /
+红蜘蛛 / 赤霉病 / 纹枯病 / 茎基腐 / 全蚀病。
+
+类别名由 `zzy_wheat/*.json` 的 LabelMe 标签与 `labels/*.txt` 的 class_id 交叉比对得出
+（原始包内没有 `classes.txt`）。转换时还做了两处清洗：6 个同时出现在两个 split 的
+文件名按 train>val>test 去重（避免验证集泄漏）；多边形坐标反归一化后裁剪到图像范围内。
+
 ---
 
 ## 7. 训练 / 评估 / 推理
@@ -462,15 +521,26 @@ python demo/demo.py \
 
 可用的训练脚本：
 
-| 脚本 | 数据集 | 对应配置 |
+| 脚本 | 说明 | 对应配置 |
 | --- | --- | --- |
-| `tools/train_net.py` | 官方（命令行覆盖 `DATASETS.TRAIN`） | 通用 |
-| `tools/train_bl+.py` | `<目录名>_*` （自动扫描，如 `coco128-seg_*`） | `run-BlendMask+.yaml`、`run-vig.yaml`、`run-BlendMask2-vig.yaml`、`run-coco128-test.yaml` |
-| `tools/train_scbl_plus.py` | `<目录名>_*`（自动扫描） | `run-SCBlendMask-plus.yaml` |
+| `tools/train_bl+.py` | **主脚本**。数据集从 `DATASETS.NAME` 或 `--dataset` 取 | 全部 |
+| `tools/train_scbl_plus.py` | 兼容壳，内容为空，逻辑全部转发到 `train_bl+.py` | `run-SCBlendMask-plus.yaml` |
+| `tools/train_net.py` | 官方版，**无数据集注册**（只能用 `adet/data/builtin.py` 里已注册的名字） | 通用 |
 
-两个脚本数据集注册逻辑相同，可互换；区别只在 `OUTPUT_DIR` 与历史用途。
-二者都会在启动时扫描 `GBADMASK_DATA_ROOT`（默认 `datasets/Plantv2`）及其同级目录，
-把存在的 COCO `instances_*.json` 注册成 `<目录名>_train` / `<目录名>_val`。
+> 前两个脚本原是两份 290 行的 `Trainer` 副本，抽走路径与注册逻辑后已逐行等价，
+> 故合并为一个实现。它们对应的实验差异**全在 yaml 里**，因此用哪个脚本都一样：
+> `--config-file configs/run-SCBlendMask-plus.yaml` 才是决定因素。
+
+全部实验变量都在配置里，换实验**不需要改代码**：
+
+| 想调什么 | 改哪个配置键 |
+| --- | --- |
+| 数据集 | `DATASETS.NAME`（或命令行 `--dataset`） |
+| 骨干 | `MODEL.BACKBONE.NAME`：`build_fcos_cspvig_bifpn_backbone` / `build_fcos_Lcspvig_bifpn_backbone` |
+| basis 模块 | `MODEL.BASIS_MODULE.NAME`：`ProtoNet` / `ProtoNetV2` |
+| 注意力类型 | `MODEL.BASIS_MODULE.ATTN`：`none` / `gc` / `cbam` / `ca` |
+| LSK 开关 | `MODEL.VIG.USE_LSK` |
+| 训练规模 | `SOLVER.MAX_ITER` / `IMS_PER_BATCH` / `BASE_LR` 等 |
 
 典型实验流程（ablation）：
 
@@ -498,10 +568,20 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py \
 OMP_NUM_THREADS=1 python tools/train_bl+.py \
     --config-file configs/run-BlendMask2-vig.yaml --num-gpus 1 \
     MODEL.BASIS_MODULE.NAME ProtoNet
+
+# ⑦ 换数据集（只改一处，配合 DATASETS.NAME 使用）
+OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-wheat-seg.yaml \
+    --num-gpus 1 --dataset coco128-seg SOLVER.MAX_ITER 600
 ```
 
 上述 ④~⑥ 均已在 coco128-seg 上实测跑通（各 20 iter）。其中 ⑥ 需要注意
 `SOLVER.MAX_ITER` 会沿用配置里的值，调试时可一并覆盖为较小的数。
+
+> ④~⑥ 说明消融**不需要改代码**：骨干、basis 模块、注意力、LSK 全是配置项。
+> 实测把 5 个变量（`META_ARCHITECTURE` / `BACKBONE.NAME` / `BASIS_MODULE.NAME` /
+> `BASIS_MODULE.ATTN` / `VIG.USE_LSK`）全部通过 yaml 切换后训练正常。
+> ⑦ 用 `--dataset` 临时换数据集时，记得两个 `NUM_CLASSES` 也要跟着改
+> （不一致时启动时会有 WARNING 提示）。
 
 ---
 
@@ -519,7 +599,7 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py \
 | 4 | `configs/run-SCBlendMask-plus.yaml`、`run-vig.yaml` | `META_ARCHITECTURE` 原为 `"BlendMask2"` / `"BlendMask3"`，均未注册 | **已修复**。`BlendMask3` 无实现，落到 `BlendMask`；`BlendMask2` 已注册 |
 | 5 | `configs/Base-BlendMask*.yaml` | `MODEL.BASIS_MODULE.LOSS_ON: True` 需要 `thing_train2017/*.npz` 监督 | **需注意**（非缺陷）。自定义数据集必须显式设为 `False`，所有 run 配置已设置。详见第 4 节 |
 | 6 | `adet/modeling/blendmask/blendmask2.py` | `from .blenders import build_blenders`、`build_basis_module3(...)`、`__all__` 与类名不符 | **已修复** |
-| 7 | `tools/train_bl+.py`、`tools/train_scbl_plus.py` | `CUDA_VISIBLE_DEVICES`、数据集根目录硬编码；`json.load` 在 import 时执行 | **已修复**。改为 `setdefault` + `GBADMASK_DATA_ROOT` + 延迟加载 |
+| 7 | `tools/train_bl+.py`、`tools/train_scbl_plus.py` | `CUDA_VISIBLE_DEVICES`、数据集根目录硬编码；`json.load` 在 import 时执行 | **已修复**。改为 `setdefault` + `GBADMASK_DATA_ROOT` + 延迟加载。现已进一步抽到 `tools/base.py` / `tools/register_datasets.py`，脚本内零路径硬编码 |
 | 7b | `fvcore` + `configs/*.yaml` | `_open_cfg` 用 `g_pathmgr.open(filename, "r")`，**未指定 encoding**，编码取决于进程 locale | **已修复**（`adet/config/defaults.py` 显式 UTF-8）。原本在 locale 为 C/POSIX 的服务器上读中文 yaml 直接 `UnicodeDecodeError` |
 | 8 | `setup.py` | `install_requires` 缺 `timm` | **已修复**。已补全并新增 `requirements.txt`（含 `Pillow<10`、`timm<1.0` 等约束） |
 | 9 | `adet/modeling/backbone/Lcspvig.py` | `LSKblock` / `BN_LSKb_act` 定义后从未被调用 | **已修复**。4 个 stage 的 transition 层已改用 `BN_LSKb_act`，参数量 4.14M → **4.53M**；新增 `MODEL.VIG.USE_LSK` 开关 |
@@ -546,6 +626,9 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py \
 
 | # | 内容 | 结果 |
 | --- | --- | --- |
+| **新增** | **数据集注册与路径外置** | 新增 `tools/base.py`（路径/环境/COCO 目录约定）与 `tools/register_datasets.py`（给名字即注册）。训练脚本不再含任何路径硬编码 |
+| **新增** | **合并重复训练脚本** | `train_scbl_plus.py` 原是 `train_bl+.py` 的 290 行副本，抽走公共逻辑后逐行等价，现改为转发壳。实验差异全在 yaml |
+| **新增** | **数据集名写入 yaml** | 新增 `DATASETS.NAME`，只写名字即可自动注册并填充 `TRAIN/TEST`；优先级 `--dataset` > `DATASETS.NAME` > `TRAIN/TEST` 反推。换数据集还会校验 `NUM_CLASSES` 一致性 |
 | P0-1~5 | 修复阻断性缺陷（docstring / registry 名 / 断链 / top_layer 通道 / THC 迁移） | `import adet` 与全部配置前向+反向均通过 |
 | P0-6 | **统一两套 basis registry** | 改进版注册为 `ProtoNetV2`，由 `MODEL.BASIS_MODULE.NAME` 选择。basis 模块与 backbone 现可**正交组合**（原来只能沿对角线跑 2×2） |
 | P0-7 | 自定义数据集关 `LOSS_ON` | 所有 run 配置已显式设为 `False` |
