@@ -56,7 +56,7 @@ class MLP(nn.Module):
     """
 
     def __init__(self, in_features, hidden_features=None,
-                 out_features=None, drop=0., mid_conv=False):
+                 out_features=None, drop=0., mid_conv=False, mid_kernel=3):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -67,7 +67,11 @@ class MLP(nn.Module):
         self.drop = nn.Dropout(drop)
 
         if self.mid_conv:
-            self.mid = nn.Conv2d(hidden_features, hidden_features, kernel_size=3, stride=1, padding=1,
+            # mid_kernel 可配（C3K 风格）：大核能扩大感受野，
+            # 对病斑这类纹理/区域型目标，5 或 7 往往比固定 3 更有效。
+            self.mid = nn.Conv2d(hidden_features, hidden_features,
+                                 kernel_size=mid_kernel, stride=1,
+                                 padding=mid_kernel // 2,
                                  groups=hidden_features)
             self.mid_norm = nn.BatchNorm2d(hidden_features)
 
@@ -93,11 +97,14 @@ class MLP(nn.Module):
 
 
 class InvertedResidual(nn.Module):
-    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0., use_layer_scale=True, layer_scale_init_value=1e-5):
+    def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0.,
+                 use_layer_scale=True, layer_scale_init_value=1e-5,
+                 mid_kernel=3):
         super().__init__()
 
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim, drop=drop, mid_conv=True)
+        self.mlp = MLP(in_features=dim, hidden_features=mlp_hidden_dim,
+                       drop=drop, mid_conv=True, mid_kernel=mid_kernel)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. \
             else nn.Identity()
@@ -270,16 +277,59 @@ class BN_Conv2d_act(nn.Module):
         return self.seq(x)
 
 
+class CSPStage(nn.Module):
+    """CSP 阶段，支持 ``c3`` / ``c2f`` 两种融合方式。
+
+    **c3（默认，等价原实现）**
+        通道分半 → 左半 ``xs`` 完全不动（连 1×1 都没有）→ 右半 ``xb`` 串行过
+        n 个 block → 只把最后一个 block 的输出与 xs 拼接 → 1×1 融合。
+        这是 C3 的退化版：信息流单一，浅层 block 只能靠链式反向拿到梯度。
+
+    **c2f（YOLOv8 风格，推荐）**
+        通道分半 → 右半串行过 n 个 block，**每个 block 的输出都保留** →
+        与 xs 一起全部 concat → 1×1 融合。
+        梯度可直接流向每个 block，特征复用显著更强，是 YOLOv8 相对 YOLOv5
+        的主要涨点来源之一，且参数量几乎不变（只增加融合层的输入通道）。
+
+    融合层输入通道数：
+        c3  : ``ch``（= ch/2 + ch/2）
+        c2f : ``(n_blocks + 2) * (ch // 2)``
+    """
+
+    def __init__(self, ch, blocks, transition, style="c3"):
+        super().__init__()
+        self.style = style
+        self.blocks = nn.ModuleList(blocks)
+        c_half = ch // 2
+        in_ch = (len(blocks) + 2) * c_half if style == "c2f" else ch
+        self.transition = transition(in_ch, ch, 1, 1, 0)
+
+    def forward(self, x):
+        xs, xb = x.chunk(2, dim=1)
+        if self.style == "c2f":
+            ys = [xs, xb]
+            y = xb
+            for m in self.blocks:
+                y = m(y)
+                ys.append(y)
+            return self.transition(torch.cat(ys, dim=1))
+        # c3：只用最后一个 block 的输出
+        for m in self.blocks:
+            xb = m(xb)
+        return self.transition(torch.cat([xs, xb], dim=1))
+
+
 class MobileViG(Backbone):
     def __init__(self,  local_blocks, local_channels,
                  global_blocks, global_channels,
                  dropout=0., drop_path=0., emb_dims=512,
                  K=2, distillation=True, num_classes=1000,
-                  out_indices=None):
+                  out_indices=None, csp_style="c3", mid_kernel=3):
         super(MobileViG, self).__init__()
 
         self.distillation = distillation
         self.out_indices = out_indices
+        self.csp_style = csp_style
         
         # global stage 里每个 block 由 Grapher + FFN 两个子模块组成，
         # 各自占用一个 drop rate，因此按 2 倍计数（与下方 dpr_idx += 2 对应）。
@@ -289,48 +339,48 @@ class MobileViG(Backbone):
 
         self.stem = Stem(input_dim=3, output_dim=local_channels[0])
 
-        local_backbone1 = []
-        for _ in range(local_blocks[0]):
-            local_backbone1.append(InvertedResidual(dim=local_channels[0]//2, mlp_ratio=4, drop_path=dpr[dpr_idx]))
-            dpr_idx += 1 
-        local_backbone1.append(BN_Conv2d_act(local_channels[0]//2, local_channels[0]//2, 1, 1,0))
-        self.add_module('local_backbone1', nn.Sequential(*local_backbone1))
+        # 各 stage 用 CSPStage 统一封装，融合方式由 csp_style 决定。
+        # 注意：原实现每个 stage 末尾还有一个 1×1 的 BN_Conv2d_act，在 c3 模式下
+        # 需保留在 blocks 列表里才能严格等价（块内输出通道为 ch/2）。
+        def make_blocks(ch, n):
+            """构造一个 stage 的 block 列表（含末尾 1×1，与原实现一致）。"""
+            nonlocal dpr_idx      # 嵌套函数内修改外层计数，必须声明
+            bl = []
+            for _ in range(n):
+                bl.append(InvertedResidual(dim=ch // 2, mlp_ratio=4,
+                                           drop_path=dpr[dpr_idx],
+                                           mid_kernel=mid_kernel))
+                dpr_idx += 1
+            bl.append(BN_Conv2d_act(ch // 2, ch // 2, 1, 1, 0))
+            return bl
 
-        self.transition1 = BN_Conv2d_act(local_channels[0], local_channels[0], 1, 1,0)
+        self.local_backbone1 = CSPStage(
+            local_channels[0], make_blocks(local_channels[0], local_blocks[0]),
+            BN_Conv2d_act, style=csp_style)
         self.down1 = Downsample(local_channels[0], local_channels[1])
 
-        local_backbone2 = []
-        for _ in range(local_blocks[1]):
-            local_backbone2.append(InvertedResidual(dim=local_channels[1]//2, mlp_ratio=4, drop_path=dpr[dpr_idx]))
-            dpr_idx += 1 
-        local_backbone2.append(BN_Conv2d_act(local_channels[1]//2, local_channels[1]//2, 1, 1,0))
-        self.add_module('local_backbone2', nn.Sequential(*local_backbone2))
-
-        self.transition2 = BN_Conv2d_act(local_channels[1], local_channels[1], 1, 1,0)
+        self.local_backbone2 = CSPStage(
+            local_channels[1], make_blocks(local_channels[1], local_blocks[1]),
+            BN_Conv2d_act, style=csp_style)
         self.down2 = Downsample(local_channels[1], local_channels[2])
 
-        local_backbone3 = []
-        for _ in range(local_blocks[2]):
-            local_backbone3.append(InvertedResidual(dim=local_channels[2]//2, mlp_ratio=4, drop_path=dpr[dpr_idx]))
-            dpr_idx += 1 
-        local_backbone3.append(BN_Conv2d_act(local_channels[2]//2, local_channels[2]//2, 1, 1,0))
-        self.add_module('local_backbone3', nn.Sequential(*local_backbone3))
-
-        self.transition3 = BN_Conv2d_act(local_channels[2], local_channels[2], 1, 1,0)
+        self.local_backbone3 = CSPStage(
+            local_channels[2], make_blocks(local_channels[2], local_blocks[2]),
+            BN_Conv2d_act, style=csp_style)
         self.down3 = Downsample(local_channels[2], global_channels[0])
 
-        backbone = []
+        gblocks = []
         for j in range(global_blocks[0]):
-            # Grapher 与 FFN 各用一个 drop rate，末尾各 +1（原实现两者共用同一个）
-            backbone += [nn.Sequential(
-                                Grapher(global_channels[0]//2, drop_path=dpr[dpr_idx], K=K),
-                                FFN(global_channels[0]//2, global_channels[0]//2* 4, drop_path=dpr[dpr_idx + 1]))
-                                ]
+            # Grapher 与 FFN 各用一个 drop rate（原实现两者共用同一个）
+            gblocks.append(nn.Sequential(
+                Grapher(global_channels[0] // 2, drop_path=dpr[dpr_idx], K=K),
+                FFN(global_channels[0] // 2, global_channels[0] // 2 * 4,
+                    drop_path=dpr[dpr_idx + 1])))
             dpr_idx += 2
-        backbone.append(BN_Conv2d_act(global_channels[0]//2, global_channels[0]//2, 1, 1,0))
-        self.add_module('backbone', nn.Sequential(*backbone))
-
-        self.transition4 = BN_Conv2d_act(global_channels[0], global_channels[0], 1, 1,0)
+        gblocks.append(BN_Conv2d_act(global_channels[0] // 2,
+                                     global_channels[0] // 2, 1, 1, 0))
+        self.backbone = CSPStage(
+            global_channels[0], gblocks, BN_Conv2d_act, style=csp_style)
 
         self._initialize_weights()
 
@@ -338,30 +388,21 @@ class MobileViG(Backbone):
     def forward(self, inputs):
         x = self.stem(inputs)
         outs = []
-        B, C, H, W = x.shape
-        xs, xb = x.chunk(2, dim=1)
-        xb = self.local_backbone1(xb)
-        x = self.transition1(torch.cat([xs, xb], dim=1))
+        # 分半与融合已封装进 CSPStage，这里只负责下采样串联
+        x = self.local_backbone1(x)
         outs.append(x)
 
         x = self.down1(x)
-        xs, xb = x.chunk(2, dim=1)
-        xb = self.local_backbone2(xb)
-        x = self.transition2(torch.cat([xs, xb], dim=1))
+        x = self.local_backbone2(x)
         outs.append(x)
 
         x = self.down2(x)
-        xs, xb = x.chunk(2, dim=1)
-        xb = self.local_backbone3(xb)
-        x = self.transition3(torch.cat([xs, xb], dim=1))
+        x = self.local_backbone3(x)
         outs.append(x)
 
         x = self.down3(x)
-        xs, xb = x.chunk(2, dim=1)
-        xb = self.backbone(xb)
-        x = self.transition4(torch.cat([xs, xb], dim=1))
+        x = self.backbone(x)
         outs.append(x)
-        #return outs
         return {'res{}'.format(i + 2): r for i, r in enumerate(outs)}
 
     def _initialize_weights(self):
@@ -403,7 +444,9 @@ def build_cspvigm_backbone(cfg, input_shape):
                     K=2,
                     distillation=True,
                     num_classes=1000,
-                    out_indices=[2, 6, 16, 20])
+                    out_indices=[2, 6, 16, 20],
+                    csp_style=cfg.MODEL.VIG.CSP_STYLE,
+                    mid_kernel=cfg.MODEL.VIG.MID_KERNEL)
 
     out_features = cfg.MODEL.RESNETS.OUT_FEATURES
     out_feature_channels = {"res2": 42, "res3": 84,

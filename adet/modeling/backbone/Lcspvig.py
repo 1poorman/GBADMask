@@ -464,7 +464,9 @@ def build_Lcspvigm_backbone(cfg, input_shape):
                     distillation=True,
                     num_classes=1000,
                     out_indices=[2, 6, 16, 20],
-                    use_lsk=cfg.MODEL.VIG.USE_LSK)
+                    use_lsk=cfg.MODEL.VIG.USE_LSK,
+                    csp_style=cfg.MODEL.VIG.CSP_STYLE,
+                    mid_kernel=cfg.MODEL.VIG.MID_KERNEL)
 
     out_features = cfg.MODEL.RESNETS.OUT_FEATURES
     out_feature_channels = {"res2": 42, "res3": 84,
