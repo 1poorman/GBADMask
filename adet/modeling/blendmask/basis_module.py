@@ -7,6 +7,10 @@ from detectron2.layers import ShapeSpec
 
 from adet.layers import conv_with_kaiming_uniform
 
+from .ca import CA_Block
+from .cbam import CBAMLayer
+from .GCblock import GlobalContextBlock
+
 
 BASIS_MODULE_REGISTRY = Registry("BASIS_MODULE")
 BASIS_MODULE_REGISTRY.__doc__ = """
@@ -14,7 +18,34 @@ Registry for basis module, which produces global bases from feature maps.
 
 The registered object will be called with `obj(cfg, input_shape)`.
 The call should return a `nn.Module` object.
+
+Registered names:
+  ProtoNet   -- 官方实现
+  ProtoNetV2 -- 本项目改进版（低层特征 + 注意力融合 + Focal-Dice-CE 损失）
 """
+
+
+def build_attention(name, channels):
+    """按名字构造注意力模块，用于 basis 模块内部的特征增强。
+
+    支持的取值见 ``MODEL.BASIS_MODULE.ATTN``：
+      "none" / "" / None -> nn.Identity()
+      "gc"               -> GCNet GlobalContextBlock（缩放-加法混合的全局上下文）
+      "cbam"             -> CBAM（通道注意力 + 空间注意力串联）
+      "ca"               -> Coordinate Attention（沿 H / W 分别编码位置信息）
+    """
+    if not name or name == "none":
+        return nn.Identity()
+    name = name.lower()
+    if name == "gc":
+        return GlobalContextBlock(channels, ratio=1 / 16)
+    if name == "cbam":
+        return CBAMLayer(channels)
+    if name == "ca":
+        return CA_Block(channels)
+    raise ValueError(
+        "未知的 MODEL.BASIS_MODULE.ATTN: {!r}，可选 none/gc/cbam/ca".format(name)
+    )
 
 
 def build_basis_module(cfg, input_shape):

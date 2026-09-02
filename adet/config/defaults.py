@@ -3,6 +3,23 @@ from detectron2.config import CfgNode as CN
 
 
 # ---------------------------------------------------------------------------- #
+# 配置文件编码
+# ---------------------------------------------------------------------------- #
+# fvcore 打开 yaml 时用的是 PathManager.open(filename, "r")，未指定 encoding，
+# 因此实际编码取决于进程的 locale。在 locale 为 C / POSIX 的机器（不少服务器与
+# Docker 镜像的默认设置）上会退化成 ascii，而本项目 configs/*.yaml 含中文注释，
+# 读取时会抛 UnicodeDecodeError。这里改为显式 UTF-8，保证与 locale 无关。
+def _open_cfg_utf8(cls, filename):
+    # 注意：要用 g_pathmgr（单例实例）而非 PathManager（类），
+    # fvcore 内部也是用的 g_pathmgr。
+    from iopath.common.file_io import g_pathmgr
+    return g_pathmgr.open(filename, "r", encoding="utf-8")
+
+
+_C.__class__._open_cfg = classmethod(_open_cfg_utf8)
+
+
+# ---------------------------------------------------------------------------- #
 # Additional Configs
 # ---------------------------------------------------------------------------- #
 _C.MODEL.MOBILENET = False
@@ -125,10 +142,23 @@ _C.MODEL.BLENDMASK.INSTANCE_LOSS_WEIGHT = 1.0
 _C.MODEL.BLENDMASK.VISUALIZE = False
 
 # ---------------------------------------------------------------------------- #
+# Vision GNN 骨干（cspvig / Lcspvig）
+# ---------------------------------------------------------------------------- #
+_C.MODEL.VIG = CN()
+# 是否在 stage 的 transition 层启用 LSK 大核选择注意力（仅 Lcspvig 生效）。
+# 关闭后 Lcspvig 退化为 cspvig，便于两者的消融对比。
+_C.MODEL.VIG.USE_LSK = True
+
+# ---------------------------------------------------------------------------- #
 # Basis Module Options
 # ---------------------------------------------------------------------------- #
 _C.MODEL.BASIS_MODULE = CN()
 _C.MODEL.BASIS_MODULE.NAME = "ProtoNet"
+# basis 模块内部使用的注意力类型，仅 ProtoNetV2 支持。
+# 可选: "none"（不加注意力）, "gc"（GCNet 全局上下文）, "cbam", "ca"（Coordinate Attention）
+_C.MODEL.BASIS_MODULE.ATTN = "gc"
+# ProtoNetV2 中低层细节分支的通道数（拼接回主干前会被降维）
+_C.MODEL.BASIS_MODULE.LOW_LEVEL_DIM = 24
 _C.MODEL.BASIS_MODULE.NUM_BASES = 4
 _C.MODEL.BASIS_MODULE.LOSS_ON = False
 _C.MODEL.BASIS_MODULE.ANN_SET = "coco"
