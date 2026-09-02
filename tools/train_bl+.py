@@ -39,7 +39,6 @@ from detectron2.utils.logger import setup_logger
 from detectron2.data.datasets.coco import load_coco_json
 
 from adet.data.dataset_mapper import DatasetMapperWithBasis
-from adet.data.fcpose_dataset_mapper import FCPoseDatasetMapper
 from adet.config import get_cfg
 from adet.checkpoint import AdetCheckpointer
 from adet.evaluation import TextEvaluator
@@ -211,10 +210,10 @@ class Trainer(DefaultTrainer):
         It calls :func:`detectron2.data.build_detection_train_loader` with a customized
         DatasetMapper, which adds categorical labels as a semantic mask.
         """
-        if cfg.MODEL.FCPOSE_ON:
-            mapper = FCPoseDatasetMapper(cfg, True)
-        else:
-            mapper = DatasetMapperWithBasis(cfg, True)
+        # FCPOSE 分支已移除：原先在此处根据 cfg.MODEL.FCPOSE_ON 选择
+        # FCPoseDatasetMapper，但该模块在本仓库中并不存在（导入即失败），
+        # 且 BlendMask 需要的是带 basis_sem 的 DatasetMapperWithBasis。
+        mapper = DatasetMapperWithBasis(cfg, True)
         return build_detection_train_loader(cfg, mapper=mapper)
 
     @classmethod

@@ -39,7 +39,6 @@ from detectron2.utils.logger import setup_logger
 from detectron2.data.datasets.coco import load_coco_json
 
 from adet.data.dataset_mapper import DatasetMapperWithBasis
-from adet.data.fcpose_dataset_mapper import FCPoseDatasetMapper
 from adet.config import get_cfg
 from adet.checkpoint import AdetCheckpointer
 from adet.evaluation import TextEvaluator
