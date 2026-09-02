@@ -7,7 +7,18 @@ import importlib
 import sys
 import math 
 
-from rapidfuzz import string_metric
+try:
+    # rapidfuzz >= 3.0：string_metric 子模块已被移除，Levenshtein 移到 distance 下
+    from rapidfuzz.distance import Levenshtein as _Levenshtein
+
+    def _levenshtein(a, b):
+        return _Levenshtein.distance(a, b)
+except ImportError:
+    # rapidfuzz < 3.0
+    from rapidfuzz import string_metric as _string_metric
+
+    def _levenshtein(a, b):
+        return _string_metric.levenshtein(a, b)
 
 WORD_SPOTTING =True
 def evaluation_imports():
@@ -379,7 +390,7 @@ def evaluate_method(gtFilePath, submFilePath, evaluationParams):
                                 # det_only_correct = True
                                 # detOnlyCorrect += 1
                                 if evaluationParams['WORD_SPOTTING']:
-                                    edd = string_metric.levenshtein(gtTrans[gtNum].upper(), detTrans[detNum].upper())
+                                    edd = _levenshtein(gtTrans[gtNum].upper(), detTrans[detNum].upper())
                                     if edd<=0: 
                                         correct = True
                                     else:
