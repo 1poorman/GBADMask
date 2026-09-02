@@ -406,7 +406,7 @@ def build_fcos_cspvig_bifpn_backbone(cfg, input_shape: ShapeSpec):
 
     Returns:
         backbone (Backbone): backbone module, must be a subclass of :class:`Backbone`.
-
+    """
     bottom_up = build_cspvigm_backbone(cfg, input_shape)
     in_features = cfg.MODEL.BiFPN.IN_FEATURES
     out_channels = cfg.MODEL.BiFPN.OUT_CHANNELS
@@ -432,7 +432,7 @@ def build_fcos_Lcspvig_bifpn_backbone(cfg, input_shape: ShapeSpec):
     Returns:
         backbone (Backbone): backbone module, must be a subclass of :class:`Backbone`.
     """
-     bottom_up = build_Lcspvigm_backbone(cfg, input_shape)
+    bottom_up = build_Lcspvigm_backbone(cfg, input_shape)
 
     in_features = cfg.MODEL.BiFPN.IN_FEATURES
     out_channels = cfg.MODEL.BiFPN.OUT_CHANNELS

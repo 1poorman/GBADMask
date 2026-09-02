@@ -45,7 +45,12 @@ class BlendMask(nn.Module):
                 cfg.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH)
 
         # build top module
-        in_channels = cfg.MODEL.FPN.OUT_CHANNELS
+        # 原实现直接读 cfg.MODEL.FPN.OUT_CHANNELS，但用 BiFPN 时实际通道数由
+        # MODEL.BiFPN.OUT_CHANNELS 决定（默认 160，与 FPN 默认的 256 不同），
+        # 会导致 top_layer 与 backbone 输出通道不匹配。这里直接向 backbone 查询
+        # 真实通道数，使 FPN / BiFPN 都能自动适配。
+        in_channels = self.backbone.output_shape()[
+            cfg.MODEL.FCOS.IN_FEATURES[0]].channels
         num_bases = cfg.MODEL.BASIS_MODULE.NUM_BASES
         attn_size = cfg.MODEL.BLENDMASK.ATTN_SIZE
         attn_len = num_bases * attn_size * attn_size

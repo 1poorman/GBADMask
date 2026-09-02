@@ -1,8 +1,14 @@
 // Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <THC/THC.h>
-#include <THC/THCDeviceUtils.cuh>
+// THC/THC.h 与 THC/THCDeviceUtils.cuh 在 PyTorch 1.11+ 已被移除，
+// 这里改用 ATen/c10 的等价 API；下面两个宏提供源码中残留 THC 符号的等价实现。
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAException.h>
+
+#define THCCeilDiv(a, b) (((a) + (b) - 1) / (b))
+#define THCudaCheck(err) C10_CUDA_CHECK(err)
+#define THCudaFree(state, ptr) c10::cuda::CUDACachingAllocator::raw_delete(ptr)
 
 #include <vector>
 #include <iostream>
@@ -86,13 +92,11 @@ at::Tensor ml_nms_cuda(const at::Tensor boxes, const float nms_overlap_thresh) {
 
   scalar_t* boxes_dev = boxes_sorted.data<scalar_t>();
 
-  THCState *state = at::globalContext().lazyInitCUDA(); // TODO replace with getTHCState
-
-  unsigned long long* mask_dev = NULL;
-  //THCudaCheck(THCudaMalloc(state, (void**) &mask_dev,
-  //                      boxes_num * col_blocks * sizeof(unsigned long long)));
-
-  mask_dev = (unsigned long long*) THCudaMalloc(state, boxes_num * col_blocks * sizeof(unsigned long long));
+  // THCState 已从 PyTorch 移除，显存分配改用 c10 缓存分配器
+  unsigned long long* mask_dev = nullptr;
+  mask_dev = static_cast<unsigned long long*>(
+      c10::cuda::CUDACachingAllocator::raw_alloc(
+          boxes_num * col_blocks * sizeof(unsigned long long)));
 
   dim3 blocks(THCCeilDiv(boxes_num, threadsPerBlock),
               THCCeilDiv(boxes_num, threadsPerBlock));
@@ -128,7 +132,7 @@ at::Tensor ml_nms_cuda(const at::Tensor boxes, const float nms_overlap_thresh) {
     }
   }
 
-  THCudaFree(state, mask_dev);
+  c10::cuda::CUDACachingAllocator::raw_delete(mask_dev);
   // TODO improve this part
   return std::get<0>(order_t.index({
                        keep.narrow(/*dim=*/0, /*start=*/0, /*length=*/num_to_keep).to(

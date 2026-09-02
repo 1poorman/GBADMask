@@ -12,14 +12,14 @@ from detectron2.modeling.meta_arch.panoptic_fpn import combine_semantic_and_inst
 from detectron2.modeling.meta_arch.build import META_ARCH_REGISTRY
 from detectron2.modeling.meta_arch.semantic_seg import build_sem_seg_head
 
-from .blenders import build_blenders
+from .blender import build_blender
 from .basis_module2 import build_basis_module2
 
 __all__ = ["BlendMask2"]
 
 
 @META_ARCH_REGISTRY.register()
-class BlendMask1(nn.Module):
+class BlendMask2(nn.Module):
     """
     Main class for BlendMask architectures (see https://arxiv.org/abd/1901.02446).
     """
@@ -32,8 +32,8 @@ class BlendMask1(nn.Module):
 
         self.backbone = build_backbone(cfg)
         self.proposal_generator = build_proposal_generator(cfg, self.backbone.output_shape()) #FCOS
-        self.blender = build_blenders(cfg)
-        self.basis_module = build_basis_module3(cfg, self.backbone.output_shape())
+        self.blender = build_blender(cfg)
+        self.basis_module = build_basis_module2(cfg, self.backbone.output_shape())
 
         # options when combining instance & semantic outputs
         self.combine_on = cfg.MODEL.PANOPTIC_FPN.COMBINE.ENABLED
@@ -45,7 +45,10 @@ class BlendMask1(nn.Module):
                 cfg.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH)
 
         # build top module
-        in_channels = cfg.MODEL.FPN.OUT_CHANNELS
+        # 同 blendmask.py：从 backbone 查询真实通道数，兼容 FPN 与 BiFPN，
+        # 避免 MODEL.FPN.OUT_CHANNELS 与 MODEL.BiFPN.OUT_CHANNELS 不一致时崩溃。
+        in_channels = self.backbone.output_shape()[
+            cfg.MODEL.FCOS.IN_FEATURES[0]].channels
         num_bases = cfg.MODEL.BASIS_MODULE.NUM_BASES
         attn_size = cfg.MODEL.BLENDMASK.ATTN_SIZE
         attn_len = num_bases * attn_size * attn_size
