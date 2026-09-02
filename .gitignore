@@ -67,3 +67,6 @@ demo/performance.py
 demo/demo2.py
 train.sh
 benchmark.sh
+
+# 训练日志（运行产物，且常被正在跑的进程持续写入）
+*.log
