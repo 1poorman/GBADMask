@@ -44,40 +44,46 @@ from adet.config import get_cfg
 from adet.checkpoint import AdetCheckpointer
 from adet.evaluation import TextEvaluator
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+# 不覆盖外部已设置的 CUDA_VISIBLE_DEVICES
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0,1,2")
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 torch.backends.cudnn.benchmark = True
 
 # 数据集路径
-
-DATASET_ROOT = '/mnt/cd/HCH/data/Plantv2/'
+# 磁盘路径不再硬编码到某一台服务器：优先读环境变量 GBADMASK_DATA_ROOT，
+# 未设置时回退到项目内的 datasets/Plantv2。目录结构见 README 第 6 节。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATASET_ROOT = os.environ.get(
+    "GBADMASK_DATA_ROOT", os.path.join(_PROJECT_ROOT, "datasets", "Plantv2")
+)
 ANN_ROOT = os.path.join(DATASET_ROOT, 'annotations')
 TRAIN_PATH = os.path.join(DATASET_ROOT, 'train2017')   #train2017
 VAL_PATH = os.path.join(DATASET_ROOT, 'val2017')    #val2017
 TRAIN_JSON = os.path.join(ANN_ROOT, 'instances_train2017.json')       #
 VAL_JSON = os.path.join(ANN_ROOT, 'instances_val2017.json')          #
 
-# 数据集类别元数据
-### 从json 文件中读取
-DATASET_CATEGORIES = json.load(open(TRAIN_JSON, 'r'))['categories']
-N = len(DATASET_CATEGORIES)  ###number classes , ignore background
-bright = True
-brightness = 1.0 if bright else 0.7
-hsv = [(i / N, 1, brightness) for i in range(N)]
-colors = list(map(lambda c: colorsys.hsv_to_rgb(*c), hsv))
-colors = (np.array(colors) * 255).astype('uint8')
-for i, category_info in enumerate(DATASET_CATEGORIES):
-    category_info.update({"isthing": 1, "color": colors[i]})
-    DATASET_CATEGORIES[i] = category_info
+
+def _build_splits():
+    """
+    purpose: 扫描 GBADMASK_DATA_ROOT 及其同级目录，返回可用的 COCO instances 数据集。
+             只做 os.path.isfile 检查，不读 json，因此数据未就绪时 import 不会失败。
+    """
+    splits = {}
+    abs_root = os.path.abspath(DATASET_ROOT)
+    for name in (os.path.basename(abs_root), "Strawberry"):
+        root = os.path.join(os.path.dirname(abs_root), name)
+        train_json = os.path.join(root, "annotations", "instances_train2017.json")
+        val_json = os.path.join(root, "annotations", "instances_val2017.json")
+        if os.path.isfile(train_json):
+            splits[name + "_train"] = (os.path.join(root, "train2017"), train_json)
+        if os.path.isfile(val_json):
+            splits[name + "_val"] = (os.path.join(root, "val2017"), val_json)
+    return splits
+
 
 # 数据集的子集
-# 注意：这里的数据集名字，需要更新到你的config文件中的DATASETS:Base-RCNN-FPN.yaml里.
-PREDEFINED_SPLITS_DATASET = {
-    #"flower_train": (TRAIN_PATH, TRAIN_JSON),
-    "Plantv2_train": (TRAIN_PATH, TRAIN_JSON),
-    #"flower_val": (VAL_PATH, VAL_JSON),
-    "Plantv2_val": (VAL_PATH, VAL_JSON),
-}
+# 注意：这里的数据集名字，需要更新到你的config文件中的 DATASETS 里.
+PREDEFINED_SPLITS_DATASET = _build_splits()
 
 
 def register_dataset():
@@ -87,16 +93,29 @@ def register_dataset():
     for key, (image_root, json_file) in PREDEFINED_SPLITS_DATASET.items():
         print('key:', key, 'image_root:', image_root, 'json_file:', json_file)
         register_dataset_instances(name=key,
-                                   metadate=get_dataset_instances_meta(),
+                                   metadate=get_dataset_instances_meta(json_file),
                                    json_file=json_file,
                                    image_root=image_root)
 
 
-def get_dataset_instances_meta():
+def get_dataset_instances_meta(json_file=TRAIN_JSON):
     """
     purpose: get metadata of dataset from DATASET_CATEGORIES
     return: dict[metadata]
     """
+    # 从 json 文件中读取类别（延迟加载，数据未就绪时不会在 import 阶段崩）
+    with open(json_file, 'r') as f:
+        DATASET_CATEGORIES = json.load(f)['categories']
+    N = len(DATASET_CATEGORIES)  ###number classes , ignore background
+    bright = True
+    brightness = 1.0 if bright else 0.7
+    hsv = [(i / N, 1, brightness) for i in range(N)]
+    colors = list(map(lambda c: colorsys.hsv_to_rgb(*c), hsv))
+    colors = (np.array(colors) * 255).astype('uint8')
+    for i, category_info in enumerate(DATASET_CATEGORIES):
+        category_info.update({"isthing": 1, "color": colors[i]})
+        DATASET_CATEGORIES[i] = category_info
+
     thing_ids = [k["id"] for k in DATASET_CATEGORIES if k["isthing"] == 1]
     thing_colors = [k["color"] for k in DATASET_CATEGORIES if k["isthing"] == 1]
     # assert len(thing_ids) == 2, len(thing_ids)
