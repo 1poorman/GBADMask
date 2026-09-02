@@ -1,0 +1,59 @@
+# 小麦病害实例分割：严谨对比实验用的公共配置
+#
+# 数据集：datasets/HBueHxOW/wheat_seg_clean（12 类小麦病害，584 train / 82 val / 152 test）
+#   CrownAndRootRot / HealthyWheat / LeafRust / PowderyMildew / WheatLooseSmut /
+#   WheatAphids / WheatCystNematode / WheatRedSpider / WheatScab /
+#   WheatSharpEyespot / WheatStalkRot / WheatTake-all
+#
+# 用的是**清洗版**（内容 MD5 去重 + 移除 6 组类别冲突），无验证集泄漏；
+# 对比有泄漏的原始版 wheat_seg（899 张 / 631 train）见 DATA.md 第 7 节。
+# 切换回原始版：把下面 DATASETS.NAME 改成 "wheat_seg"，并同步第 3 节的 epoch 换算。
+#
+# 本文件只放两个实验共用的超参，basis 模块的差异由命令行覆盖：
+#   baseline -> MODEL.BASIS_MODULE.NAME ProtoNet
+#   ours     -> MODEL.BASIS_MODULE.NAME ProtoNetV2
+# 因此两组唯一变量就是 basis 模块，其余完全一致（含 SEED）。
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  BACKBONE:
+    NAME: "build_fcos_cspvig_bifpn_backbone"
+  VIG:
+    USE_LSK: False         # 本次实验只比 basis 模块，不涉及 LSK
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    NUM_REPEATS: 3
+    NORM: "GN"
+  BASIS_MODULE:
+    ATTN: "gc"
+    LOSS_ON: False         # 数据集无 thing_train2017/*.npz 语义监督
+    NUM_CLASSES: 12        # 与数据集 categories 数量一致
+  FCOS:
+    NUM_CLASSES: 12
+DATASETS:
+  # 只写名称：自动注册 wheat_seg_clean_{train,val,test} 并填充 TRAIN/TEST。
+  # 换数据集只需改这一行（命令行 --dataset 优先级更高）。
+  NAME: "wheat_seg_clean"
+SOLVER:
+  # 实测：batch8 吞吐 16 图/秒，比 batch4（10.7 图/秒）快 50%，显存 9.6GB 安全
+  IMS_PER_BATCH: 8
+  BASE_LR: 0.005          # 按 实际batch/16 * 0.01 线性缩放：8/16*0.01 = 0.005
+  WARMUP_ITERS: 200
+  # 切到清洗版后 1 epoch = ceil(584/8) = 73 iter（原 631/8 = 79）。
+  # STEPS 按原设计的 60/80 epoch 重新对齐：60*73=4380，80*73=5840。
+  #   → 若沿用改用前的 (4800, 6400)，实际会变成 65.8 / 87.7 epoch。
+  STEPS: (4380, 5840)
+  # MAX_ITER 同样按原 ≈101 epoch 对齐：101*73 ≈ 7400
+  #   → 若沿用 8000，则为 109.6 epoch（比原设计多训练约 8 epoch）
+  MAX_ITER: 7400
+  CHECKPOINT_PERIOD: 2000
+INPUT:
+  # 原始尺寸：中位 640x480（宽 124~7360，高 122~4912，差异极大）
+  # 存在 7360x4912 的高分辨率图，需限制上界
+  MIN_SIZE_TRAIN: (320, 384, 448, 512, 576, 640)
+  MIN_SIZE_TEST: 512
+  MAX_SIZE_TRAIN: 800
+  MAX_SIZE_TEST: 800
+TEST:
+  EVAL_PERIOD: 2000
+OUTPUT_DIR: "output/wheat"

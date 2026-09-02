@@ -148,6 +148,25 @@ outputs = {"bases": [self.conv2(x)]}
 
 此外，tower 的**开头**也多插入了一个 `gcblock(planes, ratio=1/16)`。
 
+### 3.1.1 理论分析与组件有效性
+
+对照代码逐项分析后，四项改动的有效性差异显著：
+
+| 改动 | 判断 | 依据 |
+| --- | --- | --- |
+| D. Focal-Dice-CE 损失 | **原本完全不生效；启用后实测有害** | 只在 `BASIS_MODULE.LOSS_ON=True` 时计算，而那需要 `thing_train2017/*.npz` 监督，自定义数据集没有 → 配置被迫设为 `False`。已实现在线监督（3.3 节），但实测 segm AP 从 6.797 跌到 0.611（3.7 节） |
+| B. GC 注意力 | **方向存疑** | `GlobalContextBlock` 默认用 `channel_mul`，权重 shape 为 `(B,C,1,1)`，**对空间广播**。它回答"哪些通道重要"，而 bases 的核心任务是"**哪些位置**是前景" |
+| A. 低层细节分支 | 中等 | U-Net 式 skip connection 思路正确，但 24ch 容量小；且引入低层特征本为保留高频边缘，却用 GC 去平滑它，两个目标部分抵消 |
+| C. `conv2` 多一层非线性 | 轻微正向 | 唯一确定有效，但 tower 已有 4 层 3×3，边际收益递减 |
+
+**关键背景**：BlendMask 原论文与 YOLACT 的消融都表明，**bases 生成器的架构复杂度不是精度瓶颈** —— YOLACT 的 Protonet 只用 P3 单尺度、无任何注意力，bases 的分化主要靠 mask assembly loss 的梯度驱动。因此把复杂度加在 basis module 上，性价比天然偏低。
+
+> ⚠️ **上面的第 2 条（"GC 方向存疑"）已被实验否证**，实测 GC 反而是各组中最优的，
+> 详见 3.7 节。此处保留原分析以记录推理过程与教训：
+> 基于"结构相似性"的直觉判断不可靠，通道注意力在本任务中明显优于空间注意力。
+
+针对以上问题新增的改进与实测结论见 3.3～3.7 节。
+
 ### 3.2 `fdc_loss.py` —— Focal-Dice-CE 混合损失（新增）
 
 辅助语义分割损失由官方的 `F.cross_entropy` 换成自研的 `DC_and_CE_loss`：
@@ -162,18 +181,125 @@ $$
 
 配套的 `CrossentropyND`、`SoftDiceLoss`、`softmax_helper`、`get_tp_fp_fn` 移植自 nnUNet。
 
-### 3.3 其余新增文件
+### 3.3 让 FDC 损失真正生效：在线 basis 语义监督（新增）
+
+FDC 损失原被 `LOSS_ON=False` 挡住（因缺 npz 监督）。现在 dataloader 会**在线**从
+`gt_masks` 合成语义标签，无需预生成 npz：
+
+```python
+# adet/data/dataset_mapper.py: _make_basis_sem_from_instances
+sem = torch.zeros((h, w), dtype=torch.long)
+for i in range(num_instances):
+    sem[masks[i]] = gt_classes[i] + 1     # 0 保留给背景，后写的覆盖先写的
+```
+
+`MODEL.BASIS_MODULE.SEM_SOURCE` 控制来源：
+
+| 取值 | 行为 |
+| --- | --- |
+| `"npz"` | 只从预生成的 `thing_train2017/*.npz` 读取（官方行为） |
+| `"auto"`（默认） | 优先 npz，不存在时在线合成 |
+| `"online"` | 始终在线合成，完全不依赖 npz |
+
+同时修了两处：
+- `SoftDiceLoss(do_bg=False)` —— 实例分割前景像素稀少，若计入背景，Dice 会被背景主导
+  （背景几乎总预测对，Dice≈1，梯度消失）
+- 语义 GT 的降采样改为**直接对齐 `seg_out` 的实际空间尺寸**，不再依赖
+  `COMMON_STRIDE` 配置（该配置与 backbone 实际输出分辨率不符时会报尺寸不匹配）
+
+### 3.4 bases 位置编码（新增）
+
+bases 是**全图共享、位置无关**的原型，网络只能靠卷积权值共享隐式感知位置，这对
+"哪些像素是前景"的空间任务天然不利。CondInst 已验证给 mask head 输入相对坐标能
+显著提升实例掩膜质量，这里把同一技巧用在 bases 上：
+
+```python
+# MODEL.BASIS_MODULE.COORD_ON=True 时，tower 前拼接 2 通道归一化坐标 yy/xx
+x = torch.cat([x, xx, yy], dim=1)      # (B, C+2, H, W)
+```
+
+代价仅 2 个输入通道（`+2.3K` 参数），两个 ProtoNet 都支持，默认关闭。
+
+### 3.5 纯空间注意力（新增）
+
+为验证"B 项 GC 方向存疑"这一判断，把 CBAM 的 spatial 分支单独抽出成
+`spatial_attn.SpatialAttention`，与纯通道的 GC 构成对照：
+
+| `MODEL.BASIS_MODULE.ATTN` | 类型 | 权重 shape |
+| --- | --- | --- |
+| `gc` | 纯**通道** | `(B, C, 1, 1)`，空间广播 |
+| `spatial` | 纯**空间** | `(B, 1, H, W)` |
+| `cbam` | 通道 + 空间 | 两者串联 |
+| `ca` | Coordinate Attention | 沿 H/W 分别编码 |
+| `none` | 无 | `nn.Identity()` |
+
+若 `spatial` 优于 `gc`，即验证"bases 更需要空间定位能力而非通道选择"。
+
+### 3.7 小麦病害数据集上的实测消融
+
+用 `tools/run_ablation.sh` 在 `wheat_seg_clean`（584 train / 82 val，12 类）跑了 7 组，
+统一 `SEED=42`、`MAX_ITER=4000`（约 55 epoch）、单卡 3090，唯一变量为 basis 模块配置。
+
+| group | basis 模块配置 | segm AP | AP50 | vs base |
+| --- | --- | --- | --- | --- |
+| `base` | 官方 `ProtoNet` | 5.162 | 12.941 | — |
+| `nogc` | `ProtoNetV2` + `ATTN=none` | 5.538 | 15.300 | +0.376 |
+| **`gc`** | **`ProtoNetV2` + `ATTN=gc`** | **6.797** | **15.957** | **+1.635（+31.7%）** |
+| `cbam` | `ProtoNetV2` + `ATTN=cbam` | 6.111 | 14.826 | +0.949 |
+| `spatial` | `ProtoNetV2` + `ATTN=spatial` | 5.392 | 13.785 | +0.230 |
+| `fdc` | `gc` + `LOSS_ON=True` | **0.611** | 2.456 | **−4.551** |
+| `coord` | `gc` + `COORD_ON=True` | 5.331 | 14.126 | +0.169 |
+
+**结论 1：ProtoNetV2 有效，GC 注意力是主要贡献来源**
+
+- 拆解：`gc − nogc = +1.259` 为 GC 的净贡献；`nogc − base = +0.376` 为
+  「低层分支 + conv2」的贡献。两者叠加得 `+1.635`（segm AP 提升 31.7%）。
+- 与我先前"GC 空间无关、方向存疑"的理论判断**相反**。教训：通道注意力在 bases 上
+  确实有效 —— 可能因为 bases 需要先筛选与当前病害类别相关的语义通道，再谈空间定位。
+  **结构直觉不能替代实测。**
+
+**结论 2：通道注意力 > 通道+空间 > 纯空间**
+
+`gc`(6.797) > `cbam`(6.111) > `nogc`(5.538) ≈ `spatial`(5.392)。
+纯空间注意力几乎无增益（+0.230，在噪声内）；CBAM 把两者串联反而不如纯 GC，
+可能是参数量增加在小数据上过拟合。
+
+**结论 3：语义辅助损失（FDC）在本数据集上有害，默认不要开**
+
+`fdc` 组 segm AP 从 6.797 跌到 0.611，而 **bbox AP 基本正常**（5.581，检测仍工作），
+即**只有 mask 分支崩溃**。排查过程：
+
+1. 训练 loss 曲线与 `gc` 组几乎重合（`loss_mask` 0.47 vs 0.445），排除"没训起来"；
+2. 用 `fdc` 权重但 `LOSS_ON=False` 评估，AP 完全相同（0.6108），排除评估阶段干扰；
+3. 真实图片上对比 bases，发现 **`fdc` 的 bases 动态范围明显缩小**
+   （std 3.674→2.717，max +14.55→+9.92）。
+
+根因：语义分割中背景像素占绝大多数，模型倾向把 p3 特征**平滑化**以利于预测大片背景；
+而 bases 恰恰依赖这些高频细节。检测头对细节不敏感故 bbox 正常，bases 受损故 segm 崩溃。
+
+这也是官方实现默认 `LOSS_ON=False`、且需要专门 `thing_train2017` 标注的原因 ——
+该标注在 COCO 上经过筛选，不像"直接从 instance mask 合成"这样背景压倒性主导。
+若要启用，建议先降低 `LOSS_WEIGHT`（0.3 → 0.05 量级），或让语义损失梯度不回传 backbone。
+
+**结论 4：bases 位置编码（CoordConv）无明显增益**
+
+`coord` 组 5.331，低于 `gc` 的 6.797。CondInst 上有效的技巧在本任务未复现，
+可能原因：BlendMask 的 bases 本就是**全图共享**的原型，加坐标图反而诱导网络
+去记忆位置，与"位置无关的基函数"这一设计意图冲突。默认 `COORD_ON=False`。
+
+> 注：`full`（三项全开）组因 `basis_module.py` 漏 import `torch` 失败
+> （`NameError: name 'torch' is not defined`），该 bug 已修复。由于其中含已证有害的
+> FDC，该组合无重跑价值。
+
+### 3.8 其余新增文件
 
 | 文件 | 内容 | 状态 |
 | --- | --- | --- |
-| `GCblock.py` | GCNet `GlobalContextBlock`（`avg` / `att` 两种池化，`channel_add` / `channel_mul` 两种融合） | **已使用**（被 `basis_module2` 调用） |
-| `cbam.py` | `CBAMLayer`，通道注意力 + 空间注意力串联 | 仅被 import，未使用 |
-| `ca.py` | `CA_Block`，Coordinate Attention（沿 H / W 分别池化编码位置信息） | 未使用 |
-| `dice_loss.py` | nnUNet 系列损失：`SoftDiceLoss` / `MemoryEfficientSoftDiceLoss` / `TopKLoss` / `DC_and_topk_loss` 等 | 未使用 |
-| `ND_Crossentropy.py` | `CrossentropyND` / `TopKLoss` / `WeightedCrossEntropyLoss` / 距离惩罚 CE | 仅被 `dice_loss.py` 依赖 |
-| `blendmask2.py` | `BlendMask1` meta-arch | **不可运行**，见第 8 节 |
-| `build.py` | 自建 `META_ARCH_REGISTRY` + `build_model` | 死代码，无任何引用 |
-| `torch-stat.py` | 3 行 torchstat FLOPs/参数量统计脚本 | 文件名含 `-`，无法 import，只能直接 `python` 运行 |
+| `GCblock.py` | GCNet `GlobalContextBlock`（`avg` / `att` 两种池化，`channel_add` / `channel_mul` 两种融合） | **已使用**（`ATTN=gc`，实测最优） |
+| `cbam.py` | `CBAMLayer`，通道 + 空间注意力串联 | **已使用**（`ATTN=cbam`） |
+| `ca.py` | `CA_Block`，Coordinate Attention | **已使用**（`ATTN=ca`，已改为支持动态分辨率） |
+| `spatial_attn.py` | `SpatialAttention`，纯空间注意力 | **已使用**（`ATTN=spatial`，与 `gc` 构成对照） |
+| `fdc_loss.py` | `DC_and_CE_loss`（Focal-Dice-CE）、`SoftDiceLoss`、`CrossentropyND` | **已使用**（ProtoNetV2 的语义损失，见 3.3；实测在本数据集有害） |
 
 ---
 
@@ -410,7 +536,19 @@ JSON 为标准 COCO `instances` 格式（`images` / `annotations` / `categories`
 > 若开启 `MODEL.BASIS_MODULE.LOSS_ON: True`，还需要额外生成 `thing_train2017/*.npz` 的
 > basis 语义监督（见 `adet/data/dataset_mapper.py:195-214`），自定义数据集一般没有，建议直接关闭。
 
-### 6.2 用公开小数据集验证训练链路（coco128-seg）
+### 6.2 小麦病害数据集（`wheat_seg_clean`）
+
+`datasets/HBueHxOW/wheat_seg_clean`：584 train / 82 val / 152 test，12 类，1489 个实例。
+本项目所有消融实验在此数据集上进行，公共配置为 `configs/run-wheat.yaml`。
+
+复现消融结果：
+
+```bash
+export GBADMASK_DATA_ROOT=$PWD/datasets/HBueHxOW/wheat_seg_clean
+bash tools/run_ablation.sh        # 8 组，约 3.5 小时（单卡 3090）
+```
+
+### 6.3 用公开小数据集验证训练链路（coco128-seg）
 
 目标数据集尚未就绪时，可用 Ultralytics 的 **coco128-seg**（128 张 COCO 原图，
 带真实 polygon mask）先验证整条训练链路。仓库内已附转换脚本
@@ -648,13 +786,20 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-wheat-seg.
 
 ### 待办 —— 需要训练数据或实验才能定论
 
-13. **消融实验验证收益**：现在开关都已就位，建议按以下顺序跑（每组只需改 1~2 个字段）：
-    - **basis 模块**：`run-vig.yaml`（ProtoNet）vs `run-BlendMask2-vig.yaml`（ProtoNetV2）
-    - **骨干**：`run-BlendMask2-vig.yaml`（MobileViG）vs `run-SCBlendMask-plus.yaml`（Lcspvig，含 LSK）
-    - **LSK 本身**：`run-SCBlendMask-plus.yaml` 配 `MODEL.VIG.USE_LSK: False` 与 `True` 对比
-    - **注意力类型**：`MODEL.BASIS_MODULE.ATTN` 取 `none` / `gc` / `cbam` / `ca` 四档
-    四组都可通过 `--opts` 覆盖，无需新增配置文件。
-14. **FDC 损失的超参需要标定**：`gamma=0.75`、`0.8*CE + 0.2*(Dice+1)` 这组权重目前是拍的；`SoftDiceLoss` 默认 `batch_dice=False`、`do_bg=True`，在实例分割的极端不平衡场景下建议试 `do_bg=False`；另外 `DC_and_CE_loss.forward` 里 `target.view((-1,1))` 在 `weight` 为 tensor 的分支下才用到，目前 `weight=1` 恒为标量，该分支是死代码。
+13. ~~**消融实验验证收益**~~ — **已完成**，见 3.7 节实测数据。结论：
+    `gc` 组最优（segm AP 6.797 vs 官方基线 5.162，**+31.7%**）；
+    FDC 语义损失在本数据集有害（0.611）；坐标编码无增益（5.331）。
+    尚未验证的是**骨干维度**：`run-BlendMask2-vig.yaml`（MobileViG）vs
+    `run-SCBlendMask-plus.yaml`（Lcspvig，含 LSK），以及 `MODEL.VIG.USE_LSK` 的
+    `False`/`True` 对照。这两组可在 `configs/run-wheat.yaml` 上覆盖
+    `MODEL.BACKBONE.NAME` 或 `MODEL.VIG.USE_LSK` 来跑。
+14. ~~**FDC 损失的超参需要标定**~~ — 已把 `do_bg` 改为 `False`（前景稀少时计入背景
+    会让 Dice 被背景主导）。但实测表明**单靠调超参救不回来**：语义损失会让 backbone
+    特征平滑化、损害 bases 所需的高频细节（见 3.7 结论 3，segm AP 6.797 → 0.611）。
+    若要继续尝试，方向是**把 `LOSS_WEIGHT` 降到 0.05 量级**，或让语义 head 的梯度
+    **不回传 backbone**（只训 head，不污染共享特征）。
+    另外 `DC_and_CE_loss.forward` 里 `target.view((-1,1))` 在 `weight` 为 tensor 的分支下
+    才用到，目前 `weight=1` 恒为标量，该分支仍是死代码。
 15. **BiFPN 通道数**：`OUT_CHANNELS=160` + `NUM_REPEATS=6` 显存压力不小，可试 `96~128` / `3~4` 的组合作吞吐-精度权衡（已实测：512×512 + LOSS_ON 训练峰值约 0.9 GB，余量充足，实际可先按大 batch 跑）。
 16. **加载 ImageNet 预训练**：`cspvig` 目前是随机初始化（`_initialize_weights`），`run-vig.yaml` 里 `MODEL.WEIGHTS` 指向 MobileViG 权重的那行被注释掉了。解析 MobileViG 的 `state_dict` 做骨干初始化，通常收敛更快、精度更高。
 17. **训练策略**：`SOLVER.STEPS=(60000, 80000)` + `MAX_ITER=90000` 是 COCO 的 3× 配置，对小数据集（草莓/植株）可能过配，建议 `MAX_ITER=20000~30000`、`STEPS` 按 0.6/0.8 比例调整；`IMS_PER_BATCH=6` + `BASE_LR=0.001` 也不是线性缩放值（官方 16 图对应 0.01），单卡 6 图建议 `BASE_LR≈0.0025` 起调。**建议在数据集就绪后按实际收敛曲线调**。
