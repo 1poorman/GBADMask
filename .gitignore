@@ -6,12 +6,13 @@ inference_test_output
 
 *.jpg
 *.png
-*.txt
+# 注意：不要忽略所有 *.txt，否则 requirements.txt 会被一并忽略
+!requirements.txt
 # models 
 ./models/
 
-# datasets 
-./datasets
+# 正在下载中的临时数据集目录（下载完成后会移入 datasets/）
+HBueHxOW/
 # image folder 
 ./test_image
 ./output_test
@@ -47,7 +48,12 @@ dist/
 .python-version
 
 # project dirs
+# 数据本体不入库（体积大），但保留数据集转换/预处理脚本。
+# 注意：gitignore 中后出现的规则优先，因此 negation 必须写在 datasets/* 之后。
 datasets/*
+!datasets/*.py
+!datasets/.gitkeep
+!/datasets
 
 /models
 /demo_outputs
