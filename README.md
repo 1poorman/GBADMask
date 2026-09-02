@@ -39,23 +39,27 @@ adet/modeling/
 │   ├── __init__.py          ▲ 修改  导出新增的 BiFPN builder
 │   └── fpn.py dla.py vovnet.py mobilenet.py resnet_lpf.py resnet_interval.py lpf.py   （官方原样）
 └── blendmask/
-    ├── basis_module2.py     ★ 新增  低层特征 + GC 全局上下文融合的 ProtoNet
+    ├── basis_module2.py     ★ 新增  改进版 ProtoNetV2（低层特征 + 注意力融合 + FDC 损失）
     ├── fdc_loss.py          ★ 新增  Focal-Dice-CrossEntropy 混合分割损失
-    ├── GCblock.py           ★ 新增  GCNet 全局上下文块
-    ├── cbam.py              ★ 新增  CBAM 注意力（未接入）
-    ├── ca.py                ★ 新增  Coordinate Attention（未接入）
-    ├── dice_loss.py         ★ 新增  nnUNet 系列分割损失（未接入）
-    ├── ND_Crossentropy.py   ★ 新增  nnUNet ND-CE / TopK / WCE（未接入）
-    ├── blendmask2.py        ★ 新增  BlendMask1（当前不可运行）
-    ├── build.py             ★ 新增  自建 registry（死代码）
-    ├── torch-stat.py        ★ 新增  torchstat 统计脚本
+    ├── GCblock.py           ★ 新增  GCNet 全局上下文块（被 ATTN="gc" 使用）
+    ├── cbam.py              ★ 新增  CBAM 注意力（被 ATTN="cbam" 使用）
+    ├── ca.py                ★ 新增  Coordinate Attention（被 ATTN="ca" 使用，已改为支持动态分辨率）
+    ├── blendmask2.py        ★ 新增  BlendMask2（已改为继承自 BlendMask 的兼容别名）
     └── basis_module.py blender.py blendmask.py                                        （官方原样）
 ```
 
 ★ = 本项目新增 ；▲ = 在官方文件上修改 ；无标记 = 与官方一致
 
-> 注意：本项目的改动**没有新增 `adet/config/defaults.py` 节点**，全部复用 Detectron2 / AdelaiDet 已有的
-> `MODEL.BASIS_MODULE.*`、`MODEL.BiFPN.*`、`MODEL.RESNETS.OUT_FEATURES` 等字段。
+已删除的死代码：`blendmask/build.py`、`dice_loss.py`、`ND_Crossentropy.py`、`torch-stat.py`、
+`simam_module`（`fdc_loss.py` 已自带所需实现，其余全仓库无引用）。
+
+**本项目新增的配置节点**（`adet/config/defaults.py`）：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MODEL.VIG.USE_LSK` | `True` | 是否在 Lcspvig 的 transition 层启用 LSK |
+| `MODEL.BASIS_MODULE.ATTN` | `"gc"` | basis 内部注意力类型：`none`/`gc`/`cbam`/`ca` |
+| `MODEL.BASIS_MODULE.LOW_LEVEL_DIM` | `24` | `ProtoNetV2` 低层细节分支通道数 |
 
 ---
 
@@ -181,24 +185,32 @@ $$
 configs/
 ├── Base-BlendMask.yaml            ResNet + FPN，官方基线（COCO）
 ├── Base-BlendMask-BiFPN.yaml      ResNet + BiFPN，官方基线（COCO，本项目 run-*.yaml 的公共父配置）
-├── run-BlendMask+.yaml            ★ BlendMask  + MobileViG + BiFPN
-├── run-vig.yaml                   ★ BlendMask  + MobileViG + BiFPN（Plantv2）
-├── run-BlendMask2-vig.yaml        ★ BlendMask2 + MobileViG + BiFPN
-└── run-SCBlendMask+ .yaml         ★ BlendMask2 + Lcspvig  + BiFPN
+├── run-BlendMask+.yaml            ★ 官方 basis + MobileViG + BiFPN
+├── run-vig.yaml                   ★ 官方 basis + MobileViG + BiFPN（Plantv2，基线）
+├── run-BlendMask2-vig.yaml        ★ 改进 basis + MobileViG + BiFPN
+└── run-SCBlendMask-plus.yaml      ★ 改进 basis + Lcspvig(含 LSK) + BiFPN
 ```
 
-**两种 meta 架构的区别**（关键，容易踩坑）：
+**两个可正交组合的维度**（原本被绑死，现已解耦）：
 
-| `MODEL.META_ARCHITECTURE` | basis 模块 | 语义辅助损失 |
+| 维度 | 控制字段 | 取值 |
 | --- | --- | --- |
-| `BlendMask` | `basis_module.ProtoNet`（官方） | `F.cross_entropy` |
-| `BlendMask2` | `basis_module2.ProtoNet`（低层特征 + GCNet 融合） | `DC_and_CE_loss`（Focal-Dice-CE） |
+| basis 模块 | `MODEL.BASIS_MODULE.NAME` | `ProtoNet`（官方）/ `ProtoNetV2`（改进：低层特征 + 注意力融合 + Focal-Dice-CE） |
+| 骨干 | `MODEL.BACKBONE.NAME` | `build_fcos_cspvig_bifpn_backbone`（MobileViG）/ `build_fcos_Lcspvig_bifpn_backbone`（+LSK） |
 
-因此 `run-vig.yaml` 与 `run-BlendMask2-vig.yaml` 构成一对消融实验——**两者唯一区别就是 meta 架构**，可用来单独量化 basis 模块改动的收益。
+因此 4 个 run 配置可以拆成 2×2 网格：
+`run-vig`（官方+ViG）× `run-BlendMask2-vig`（改进+ViG）× `run-SCBlendMask-plus`（改进+Lcspvig），
+缺的"官方 basis + Lcspvig"只需在 `run-SCBlendMask-plus.yaml` 上覆盖
+`--opts MODEL.BASIS_MODULE.NAME ProtoNet` 即可。
 
-> ⚠️ `BlendMask2` 的 Focal-Dice-CE 损失**只在 `BASIS_MODULE.LOSS_ON=True` 时生效**，
+> ⚠️ `META_ARCHITECTURE` 的 `BlendMask` 与 `BlendMask2` 现在**行为完全一致**
+> （`BlendMask2` 仅为向后兼容保留的子类别名）。basis 模块的差异请一律用
+> `MODEL.BASIS_MODULE.NAME` 控制，不要再依赖 meta 架构名。
+
+> ⚠️ `ProtoNetV2` 的 Focal-Dice-CE 损失**只在 `BASIS_MODULE.LOSS_ON=True` 时生效**，
 > 而 `LOSS_ON=True` 需要数据集额外提供 `thing_train2017/*.npz` 监督。
-> 自定义数据集上 `LOSS_ON=False`，此时 `BlendMask2` 相对 `BlendMask` 生效的只有 **GC 特征融合**这一项。
+> 自定义数据集上 `LOSS_ON=False`，此时 `ProtoNetV2` 相对 `ProtoNet` 生效的只有
+> **GC 特征融合 + 输出头多一层非线性**这两项。
 
 ### 4.1 关键字段
 
@@ -212,15 +224,18 @@ configs/
 | `MODEL.BASIS_MODULE.CONVS_DIM` | ProtoNet 内部通道 | 默认 128 |
 | `MODEL.BASIS_MODULE.LOSS_ON` | 是否开启 basis 语义辅助损失 | **自定义数据集必须设为 `False`**，见第 8 节 |
 | `MODEL.BASIS_MODULE.NUM_CLASSES` | 辅助语义头类别数 | 必须 = 数据集类别数 |
-| `MODEL.BASIS_MODULE.NAME` | 在 basis registry 中查找的类名 | 默认 `"ProtoNet"`；两套 registry 里各注册了一个同名 `ProtoNet`，由 meta 架构决定用哪套 |
+| `MODEL.BASIS_MODULE.NAME` | basis 模块类名 | `ProtoNet`（官方）/ `ProtoNetV2`（改进），见上一节 |
+| `MODEL.BASIS_MODULE.ATTN` | basis 内部注意力类型 | `none` / `gc`（默认）/ `cbam` / `ca`，仅 `ProtoNetV2` 支持 |
+| `MODEL.BASIS_MODULE.LOW_LEVEL_DIM` | `ProtoNetV2` 低层细节分支通道数 | 默认 24 |
 | `MODEL.BASIS_MODULE.LOSS_WEIGHT` | basis 语义辅助损失权重 | 默认 0.3，仅 `LOSS_ON=True` 时生效 |
+| `MODEL.VIG.USE_LSK` | 是否在 Lcspvig 的 transition 层启用 LSK | 默认 `True`；设 `False` 则退化为普通 cspvig，用于消融 |
 | `MODEL.FCOS.NUM_CLASSES` | 检测头前景类别数 | 必须 = 数据集类别数 |
 | `MODEL.FCOS.TOP_LEVELS` | BiFPN 额外生成的顶层数（p6/p7） | 默认 2 |
 
 ### 4.2 数据集路径
 
 > ⚠️ `configs/*.yaml` 里只保存**数据集的注册名**（如 `Plantv2_train`），
-> **真实磁盘路径不在 yaml 中**，而是写在 `tools/train_bl+.py` / `tools/train_scbl+ .py` 顶部的
+> **真实磁盘路径不在 yaml 中**，而是写在 `tools/train_bl+.py` / `tools/train_scbl_plus.py` 顶部的
 > `DATASET_ROOT` 常量里。原先该值硬编码为另一台服务器的 `/mnt/cd/HCH/data/Plantv2/`。
 
 现已改为可通过环境变量覆盖：
@@ -329,21 +344,27 @@ print('adet._C ops:', sorted(a for a in dir(_C) if not a.startswith('_')))
 #                 'def_roi_align_backward', 'def_roi_align_forward', 'ml_nms']
 ```
 
-跑一遍完整冒烟测试（构建模型 + 推理出 mask + 训练反向）：
+跑一遍端到端验证。推荐用 6.2 节的 coco128-seg 小数据集，它会完整走通
+「数据加载 → 训练 → 评估」链路：
 
 ```bash
-cd /home/huachenghao/codes/GBADMask
-python tests/tmp/smoke_test.py
+export GBADMASK_DATA_ROOT=$PWD/datasets/coco128-seg
+CUDA_VISIBLE_DEVICES=1 python tools/train_bl+.py \
+    --config-file configs/run-coco128-test.yaml --num-gpus 1
 ```
 
-该脚本会依次验证 4 个 run 配置能否：① 构建模型 ② GPU 推理并输出与原图同尺寸的
-`pred_masks` ③ 前向算出 5 个 loss ④ 反向得到非零梯度。全部通过时输出 `passed 4/4`。
+若只想快速验证模型能否构建并前向/反向（不需要数据），可临时写一个脚本，
+对 4 个 run 配置依次调用 `build_model` + `model(inputs)` + `loss.backward()`。
+注意构造输入时：`gt_boxes` 必须是 `Boxes` 对象、`gt_masks` 必须是 `BitMasks`、
+`basis_sem` 必须是 2D 的 `(H, W)`（内部会补 batch 维并再 `unsqueeze(1)`）。
 
 ---
 
 ## 6. 数据准备
 
-数据尚未下载到本机。目录需按 COCO 格式组织：
+### 6.1 目标项目的自有数据（草莓 / 植株）
+
+目录需按 COCO 格式组织：
 
 ```
 datasets/
@@ -360,6 +381,47 @@ JSON 为标准 COCO `instances` 格式（`images` / `annotations` / `categories`
 
 > 若开启 `MODEL.BASIS_MODULE.LOSS_ON: True`，还需要额外生成 `thing_train2017/*.npz` 的
 > basis 语义监督（见 `adet/data/dataset_mapper.py:195-214`），自定义数据集一般没有，建议直接关闭。
+
+### 6.2 用公开小数据集验证训练链路（coco128-seg）
+
+目标数据集尚未就绪时，可用 Ultralytics 的 **coco128-seg**（128 张 COCO 原图，
+带真实 polygon mask）先验证整条训练链路。仓库内已附转换脚本
+`datasets/prepare_coco_seg.py`（原始格式为 YOLO-seg，需转成 COCO instances）。
+
+```bash
+conda activate gbadmask
+cd /home/huachenghao/codes/GBADMask
+
+# 1) 下载（约 7 MB）
+mkdir -p datasets/_dl
+curl -L -o datasets/_dl/coco128-seg.zip \
+     https://ultralytics.com/assets/coco128-seg.zip
+
+# 2) 转换（自动按 25% 划分 val）
+python datasets/prepare_coco_seg.py coco128-seg
+#   -> datasets/coco128-seg/{annotations,train2017,val2017}
+#      96 train / 32 val / 929 实例 / 69 类
+
+# 3) 训练 600 次迭代（单卡 3090 约 1.5 分钟）
+export GBADMASK_DATA_ROOT=$PWD/datasets/coco128-seg
+CUDA_VISIBLE_DEVICES=1 python tools/train_bl+.py \
+    --config-file configs/run-coco128-test.yaml --num-gpus 1
+```
+
+**实测结果**（`run-coco128-test.yaml`，600 iter 从头训练）：
+
+| 指标 | bbox | segm |
+| --- | --- | --- |
+| AP | 0.181 | 0.089 |
+| AP50 | 0.444 | 0.312 |
+| APl | 0.651 | 0.347 |
+
+峰值显存约 1.8 GB，速度约 0.145 s/iter。128 张图不足以训练出可用模型，
+但 AP50 从 0 涨到 0.44 说明**数据加载、梯度流、mask 分支、评估链路全部正确**。
+
+> 注意：本项目 `.gitignore` 默认忽略 `datasets/`，该目录仅在本地用于验证，不会被提交。
+> 网络受限时 `images.cocodataset.org` 与 GitHub 常不可达，`ultralytics.com` 通常可用
+> （实测约 100~675 KB/s）。
 
 ---
 
@@ -391,16 +453,20 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py \
 python demo/demo.py \
     --config-file configs/run-BlendMask+.yaml \
     --input datasets/Plantv2/val2017/*.jpg \
-    --opts MODEL.WEIGHTS output/blendmask-plus/model_final.pth
+    MODEL.WEIGHTS output/blendmask-plus/model_final.pth
 ```
+
+> **命令行覆盖配置的正确写法**：detectron2 的 `opts` 是**位置参数**
+> （`nargs=argparse.REMAINDER`），**不是** `--opts` 标志。写成 `--opts A B` 会报
+> `unrecognized arguments`。正确形式是把键值对直接放在命令末尾。
 
 可用的训练脚本：
 
 | 脚本 | 数据集 | 对应配置 |
 | --- | --- | --- |
-| `tools/train_net.py` | 官方（命令行 `--opts DATASETS.TRAIN`） | 通用 |
-| `tools/train_bl+.py` | `Plantv2_*` / `Strawberry_*`（自动扫描） | `run-BlendMask+.yaml`、`run-vig.yaml`、`run-BlendMask2-vig.yaml` |
-| `tools/train_scbl+ .py` | `Plantv2_*` / `Strawberry_*`（自动扫描） | `run-SCBlendMask+ .yaml` |
+| `tools/train_net.py` | 官方（命令行覆盖 `DATASETS.TRAIN`） | 通用 |
+| `tools/train_bl+.py` | `<目录名>_*` （自动扫描，如 `coco128-seg_*`） | `run-BlendMask+.yaml`、`run-vig.yaml`、`run-BlendMask2-vig.yaml`、`run-coco128-test.yaml` |
+| `tools/train_scbl_plus.py` | `<目录名>_*`（自动扫描） | `run-SCBlendMask-plus.yaml` |
 
 两个脚本数据集注册逻辑相同，可互换；区别只在 `OUTPUT_DIR` 与历史用途。
 二者都会在启动时扫描 `GBADMASK_DATA_ROOT`（默认 `datasets/Plantv2`）及其同级目录，
@@ -409,78 +475,109 @@ python demo/demo.py \
 典型实验流程（ablation）：
 
 ```bash
-# ① 官方 basis 模块 + ViG 骨干（基线）
+# ① 官方 basis 模块 + MobileViG（基线）
 OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-vig.yaml --num-gpus 1
 
-# ② 改进 basis 模块（GC 融合）+ ViG 骨干
+# ② 改进 basis 模块 + MobileViG
 OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-BlendMask2-vig.yaml --num-gpus 1
 
-# ③ 改进 basis 模块 + Lcspvig 骨干
-OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file "configs/run-SCBlendMask+ .yaml" --num-gpus 1
+# ③ 改进 basis 模块 + Lcspvig（含 LSK）
+OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-SCBlendMask-plus.yaml --num-gpus 1
+
+# ④ 消融：关掉 LSK，单独量化 LSK 的收益
+OMP_NUM_THREADS=1 python tools/train_bl+.py \
+    --config-file configs/run-SCBlendMask-plus.yaml --num-gpus 1 \
+    MODEL.VIG.USE_LSK False
+
+# ⑤ 消融：对比注意力类型（gc / cbam / ca / none）
+OMP_NUM_THREADS=1 python tools/train_bl+.py \
+    --config-file configs/run-BlendMask2-vig.yaml --num-gpus 1 \
+    MODEL.BASIS_MODULE.ATTN cbam
+
+# ⑥ 消融：官方 vs 改进 basis 模块（在同一骨干上）
+OMP_NUM_THREADS=1 python tools/train_bl+.py \
+    --config-file configs/run-BlendMask2-vig.yaml --num-gpus 1 \
+    MODEL.BASIS_MODULE.NAME ProtoNet
 ```
 
-> 注意文件名含空格，命令行要加引号（详见 [P1-8](#p1--工程健壮性)）。
+上述 ④~⑥ 均已在 coco128-seg 上实测跑通（各 20 iter）。其中 ⑥ 需要注意
+`SOLVER.MAX_ITER` 会沿用配置里的值，调试时可一并覆盖为较小的数。
 
 ---
 
 ## 8. 已知问题
 
-> 以下问题都是当前代码里**真实存在**的，按严重程度排序。前 5 条会导致训练直接跑不起来。
+> 下表按严重程度排序。**除 #5、#11、#14 外均已修复**（加删除线或标注"已修复"的条目）。
+> #5 属于使用方式问题（自定义数据集必须关 `LOSS_ON`），#11 是纯风格，#14 已无残留。
 
-| # | 位置 | 问题 | 影响 |
+| # | 位置 | 问题 | 状态与影响 |
 | --- | --- | --- | --- |
-| 1 | `adet/modeling/backbone/bifpn.py:402-424`（**已修复**） | `build_fcos_cspvig_bifpn_backbone` 的 docstring `"""` 没有闭合，导致其后所有内容被吞进字符串，最终 `unterminated triple-quoted string literal` | **`import adet` 直接 SyntaxError**，连环境都装不完。现已补上结尾 `"""` 并修掉 `Lcspvig` 函数体首行多出的缩进空格 |
-| 2 | `adet/modeling/blendmask/basis_module2.py:18`（**已缓解**） | `ProtoNet` 注册在独立的 `Registry("BASIS_MODULE2")`，而 `blendmask.py` 用的是 `basis_module.build_basis_module`（查 `Registry("BASIS_MODULE")`） | 改进版**只能**通过 `META_ARCHITECTURE="BlendMask2"` 生效。已新增 `configs/run-BlendMask2-vig.yaml`，`run-SCBlendMask+ .yaml` 也已还原为 `BlendMask2`；但 `run-BlendMask+.yaml` / `run-vig.yaml` 仍是官方 ProtoNet。两套 registry 并存的写法仍建议统一（见 P0-2） |
-| 3 | `configs/run-BlendMask+.yaml` 等（**已修复**） | `MODEL.BACKBONE.NAME` 拼错：`build_fcos_csp_vig_bifpn_backbone` / `build_fcos_Lcsp_vig_bifpn_backbone` / `build_fcos_cspvigm_bifpn_backbone` 均未注册 | registry 报 `KeyError`。已全部改为实际注册名 `build_fcos_cspvig_bifpn_backbone` / `build_fcos_Lcspvig_bifpn_backbone` |
-| 4 | `configs/run-SCBlendMask+ .yaml`、`run-vig.yaml`（**已修复**） | `META_ARCHITECTURE` 原为 `"BlendMask2"` / `"BlendMask3"`，当时均未注册。`BlendMask3` 无对应实现，已改为 `"BlendMask"`；`BlendMask2` 现已由 `blendmask/class BlendMask2` 补齐注册，配置已还原 | 构建模型时报 `KeyError` |
-| 5 | `configs/Base-BlendMask*.yaml` | `MODEL.BASIS_MODULE.LOSS_ON: True` 需要 `thing_train2017/*.npz` 的 basis 语义监督 | 自定义数据集上 dataloader 直接 `FileNotFoundError` |
-| 6 | `adet/modeling/blendmask/blendmask2.py`（**已修复**） | 原 `from .blenders import build_blenders`（实际文件是 `blender.py`，函数是 `build_blender`）、`build_basis_module3(...)`（不存在）、`__all__` 写 `"BlendMask2"` 但类名是 `BlendMask1` | 该文件 import 即失败。现已逐项修正并注册为 `BlendMask2` |
-| 7 | `tools/train_bl+.py:47,53,62`、`tools/train_scbl+ .py` | `CUDA_VISIBLE_DEVICES="0,1,2"`、数据集根目录、以及**模块加载时**的 `json.load(open(TRAIN_JSON))` 全部硬编码 | 换机器 / 数据未就绪时 import 阶段就崩 |
-| 8 | `setup.py:74-87` | `install_requires` 缺 `timm`，而 `cspvig.py` / `Lcspvig.py` 必须 import `timm` | 干净环境下 `import adet` 失败 |
-| 9 | `adet/modeling/backbone/Lcspvig.py:305-323` | `BN_LSKb_act` / `LSKblock` 定义后从未被 `MobileViG.forward` 调用 | "SC"（大核选择）分支实际未生效，`Lcspvig` ≡ `cspvig` |
-| 10 | `adet/modeling/blendmask/basis_module2.py:78-79` | `nn.Conv2d(..., kernel_size=1, stride=1, padding=1)`，1×1 卷积配 `padding=1` 会改变空间尺寸且无意义 | 分辨率出现 off-by-2，靠后续插值掩盖 |
-| 11 | `adet/modeling/backbone/bifpn.py:401` | `@BACKBONE_REGISTRY.register()` 与 `def` 之间缺空行、`backbone/__init__.py` 里 3 个 import 挤在一行 | 纯风格问题 |
-| 12 | `adet/modeling/backbone/cspvig.py:6,8-10,343` | `import numpy` 未使用；`IMAGENET_DEFAULT_MEAN/STD`、`register_model`、`ConvBnAct` 均为无效 import（timm 1.x 已移除 `timm.models.layers.ConvBnAct`） | 在 timm ≥ 1.0 下 import 失败；依赖必须锁 `timm==0.6.12` |
-| 13 | `tools/train_scbl+ .py` | 文件名含空格 | 命令行需引号，易踩坑 |
-| 14 | `configs/run-*.yaml` | `MODEL.RESNETS.DEPTH: 50` 对 ViG 骨干无效 | 误导性配置 |
-| 15 | `adet/modeling/blendmask/blendmask.py:48`（**已修复**） | `top_layer` 的输入通道写死读 `cfg.MODEL.FPN.OUT_CHANNELS`（默认 256），但用 BiFPN 时实际通道由 `MODEL.BiFPN.OUT_CHANNELS` 决定（默认 160） | **所有 BiFPN 配置一做前向就崩**：`expected input to have 256 channels, but got 160`。已改为向 `self.backbone.output_shape()` 查询真实通道数，FPN / BiFPN 自动适配 |
-| 16 | `adet/layers/csrc/ml_nms/ml_nms.cu`（**已修复**） | 使用 `THC/THC.h` 系列 API，而 THC 在 PyTorch 1.11+ 已被移除 | 编译 `adet._C` 时 `fatal error: THC/THC.h: No such file`。已迁移到 ATen/c10，见 5.3 节 |
-| 17 | 环境依赖 | `detectron2 v0.6` 依赖 `PIL.Image.LINEAR`（Pillow ≥10 已移除）；`omegaconf` 会把 `antlr4-python3-runtime` 顶到 4.9.x（BAText 要求 4.8） | 需 `pip install Pillow==9.5.0 antlr4-python3-runtime==4.8`，见 5.2 节 |
+| 1 | `adet/modeling/backbone/bifpn.py` | `build_fcos_cspvig_bifpn_backbone` 的 docstring `"""` 没有闭合，导致其后所有内容被吞进字符串 | **已修复**。原本 `import adet` 直接 SyntaxError |
+| 2 | `adet/modeling/blendmask/basis_module2.py` | 自建 `Registry("BASIS_MODULE2")`，与其他模块不在同一 registry | **已修复**。改为复用 `BASIS_MODULE_REGISTRY`，改进版注册为 **`ProtoNetV2`**，由 `MODEL.BASIS_MODULE.NAME` 选择；basis 模块与 backbone 现可正交消融 |
+| 2b | `adet/modeling/blendmask/blendmask2.py` | 原本是 `BlendMask` 的近乎逐行拷贝（约 150 行重复） | **已修复**。改为继承 `BlendMask`，仅作向后兼容别名 |
+| 3 | `configs/run-BlendMask+.yaml` 等 | `MODEL.BACKBONE.NAME` 拼错（3 处） | **已修复**。改为实际注册名 |
+| 4 | `configs/run-SCBlendMask-plus.yaml`、`run-vig.yaml` | `META_ARCHITECTURE` 原为 `"BlendMask2"` / `"BlendMask3"`，均未注册 | **已修复**。`BlendMask3` 无实现，落到 `BlendMask`；`BlendMask2` 已注册 |
+| 5 | `configs/Base-BlendMask*.yaml` | `MODEL.BASIS_MODULE.LOSS_ON: True` 需要 `thing_train2017/*.npz` 监督 | **需注意**（非缺陷）。自定义数据集必须显式设为 `False`，所有 run 配置已设置。详见第 4 节 |
+| 6 | `adet/modeling/blendmask/blendmask2.py` | `from .blenders import build_blenders`、`build_basis_module3(...)`、`__all__` 与类名不符 | **已修复** |
+| 7 | `tools/train_bl+.py`、`tools/train_scbl_plus.py` | `CUDA_VISIBLE_DEVICES`、数据集根目录硬编码；`json.load` 在 import 时执行 | **已修复**。改为 `setdefault` + `GBADMASK_DATA_ROOT` + 延迟加载 |
+| 7b | `fvcore` + `configs/*.yaml` | `_open_cfg` 用 `g_pathmgr.open(filename, "r")`，**未指定 encoding**，编码取决于进程 locale | **已修复**（`adet/config/defaults.py` 显式 UTF-8）。原本在 locale 为 C/POSIX 的服务器上读中文 yaml 直接 `UnicodeDecodeError` |
+| 8 | `setup.py` | `install_requires` 缺 `timm` | **已修复**。已补全并新增 `requirements.txt`（含 `Pillow<10`、`timm<1.0` 等约束） |
+| 9 | `adet/modeling/backbone/Lcspvig.py` | `LSKblock` / `BN_LSKb_act` 定义后从未被调用 | **已修复**。4 个 stage 的 transition 层已改用 `BN_LSKb_act`，参数量 4.14M → **4.53M**；新增 `MODEL.VIG.USE_LSK` 开关 |
+| 10 | `adet/modeling/blendmask/basis_module2.py` | 1×1 卷积误用 `padding=1` | **已修复**。改为 `padding=0` |
+| 11 | `adet/modeling/backbone/bifpn.py`、`backbone/__init__.py` | 装饰器与 `def` 之间缺空行；多个 import 挤在一行 | 纯风格问题，未改 |
+| 12 | `adet/modeling/backbone/cspvig.py` | `import numpy` 未使用；`IMAGENET_DEFAULT_MEAN/STD`、`register_model`、`ConvBnAct` 均无效（timm 1.x 已移除 `ConvBnAct`） | **已修复**。仅保留实际使用的 `DropPath` |
+| 13 | `tools/train_scbl+ .py`、`configs/run-SCBlendMask+ .yaml` | 文件名含空格 | **已修复**。已用 `git mv` 重命名为 `train_scbl_plus.py` / `run-SCBlendMask-plus.yaml` |
+| 14 | `configs/run-*.yaml` | `MODEL.RESNETS.DEPTH` 对 ViG 骨干无效 | **已清理** |
+| 15 | `adet/modeling/blendmask/blendmask.py` | `top_layer` 写死读 `MODEL.FPN.OUT_CHANNELS`(256)，而 BiFPN 实际是 160 | **已修复**。改为向 `backbone.output_shape()` 查询真实通道 |
+| 16 | `adet/layers/csrc/ml_nms/ml_nms.cu` | 使用 `THC/THC.h` 系列 API，PyTorch 1.11+ 已移除 | **已修复**。迁移到 ATen/c10，见 5.3 节 |
+| 17 | 环境依赖 | detectron2 v0.6 依赖 `PIL.Image.LINEAR`（Pillow ≥10 已移除）；`omegaconf` 会把 `antlr4` 顶到 4.9.x | **已在 `requirements.txt` 中锁定** `Pillow==9.5.0`、`antlr4-python3-runtime==4.8` |
+| 18 | `adet/modeling/blendmask/ca.py` | `CA_Block` 构造时需固定 `h` / `w`，无法用于分辨率可变网络 | **已修复**。改为运行时推断尺寸 + `AdaptiveAvgPool2d((None, 1))`，现已可通过 `ATTN="ca"` 启用 |
+| 19 | `adet/modeling/backbone/cspvig.py`、`Lcspvig.py` | global stage 的 `Grapher` 与 `FFN` 共用同一个 drop rate，而 local stage 每个 block 一个 | **已修复**。改为各占一个，`n_blocks` 同步按 `2 * sum(global_blocks)` 计 |
+| 20 | `adet/modeling/backbone/bifpn.py` | 融合时 `torch.stack(nodes, -1)` 显式物化 `[B,C,H,W,n]` 五维张量 | **已优化**。改为逐路加权累加（数值等价，实测偏差 0.0），峰值显存省约 10% |
+| 21 | `tools/train_bl+.py:42`、`tools/train_scbl_plus.py:42` | `from adet.data.fcpose_dataset_mapper import FCPoseDatasetMapper` —— 该模块在本仓库中**不存在** | **已修复**。改为本项目实际需要的 `DatasetMapperWithBasis`（BlendMask 需要它产出 `basis_sem`）。原本一运行训练脚本就 `ModuleNotFoundError` |
+| 22 | `adet/evaluation/text_eval_script.py:10` | `from rapidfuzz import string_metric`，而 rapidfuzz 3.x 已移除该子模块 | **已修复**。改为优先用 `rapidfuzz.distance.Levenshtein`，并保留旧版回退分支 |
+| 23 | `adet/modeling/blendmask/ca.py` | `split([w, h], 3)` 顺序写反；cat 时先放 `x_h`（长度 h），应按 `[h, w]` 切 | **已修复**。原写法在**非正方形**特征图上会崩（`expanded size (64) must match (80)`）。正方形输入时不报错，所以此前冒烟测试未暴露 |
 
 ---
 
 ## 9. 优化建议
 
-### P0 —— 先让代码能跑通
+### 已完成
 
-1. ~~**修复 `bifpn.py` 未闭合的 docstring**（第 8 节 #1）~~ — 已修掉（含 `Lcspvig` 函数体首行的多余缩进）。
-2. ~~**修正 3 个 run 配置的 `MODEL.BACKBONE.NAME` 与 `META_ARCHITECTURE`**（第 8 节 #3、#4）~~ — 已全部改为实际注册名。
-3. ~~**修复 `blendmask2.py` 的三处断链**（第 8 节 #6）~~ — `blenders` → `blender`、`build_basis_module3` → `build_basis_module2`、`BlendMask1` → `BlendMask2`。
-4. ~~**修复 `top_layer` 通道硬编码**（第 8 节 #15）~~ — 改为向 backbone 查询真实通道数，BiFPN 配置现在能跑前向了。
-5. ~~**把 `ml_nms.cu` 从 THC 迁到 ATen/c10**（第 8 节 #16）~~ — torch 2.0 下 `adet._C` 已能编译。
-6. **统一两套 basis registry**：目前 `basis_module.py`（`Registry("BASIS_MODULE")`）与 `basis_module2.py`（`Registry("BASIS_MODULE2")`）各自注册了一个同名 `ProtoNet`，只能靠 `META_ARCHITECTURE` 在 `BlendMask` / `BlendMask2` 之间整体切换，**无法单独替换 basis 模块**。建议删掉第二个 registry，把改进版改名 `ProtoNetV2` 注册进第一个，再用 `MODEL.BASIS_MODULE.NAME: "ProtoNet"/"ProtoNetV2"` 自由组合——这样"官方 CE vs FDC 损失""ViG vs Lcspvig"才能正交消融，而不是现在的 2×2 只能跑对角。
-7. **自定义数据集关掉 `BASIS_MODULE.LOSS_ON`**，或写一个离线脚本把 COCO 的 instance mask 预先烘成 `thing_train2017/*.npz`。目前所有 run 配置都已显式设为 `False`。
+| # | 内容 | 结果 |
+| --- | --- | --- |
+| P0-1~5 | 修复阻断性缺陷（docstring / registry 名 / 断链 / top_layer 通道 / THC 迁移） | `import adet` 与全部配置前向+反向均通过 |
+| P0-6 | **统一两套 basis registry** | 改进版注册为 `ProtoNetV2`，由 `MODEL.BASIS_MODULE.NAME` 选择。basis 模块与 backbone 现可**正交组合**（原来只能沿对角线跑 2×2） |
+| P0-7 | 自定义数据集关 `LOSS_ON` | 所有 run 配置已显式设为 `False` |
+| P1-8 | 数据集与设备外置 | `GBADMASK_DATA_ROOT` 环境变量 + 类别 json 延迟加载 + `setdefault` |
+| P1-9 | 补 `setup.py` 依赖 + `requirements.txt` | 已补 `timm<1.0` / `rapidfuzz` / `omegaconf` 等，并固化实测版本组合 |
+| P1-10 | 清理死代码 | 删除 `blendmask/build.py`、`dice_loss.py`、`ND_Crossentropy.py`、`torch-stat.py`、`simam_module`；清理无效 import。**注意 `ca.py` / `cbam.py` 未被删除**，而是改造成可用模块（见 P2-13） |
+| P1-11 | 文件名去空格 | `git mv` 重命名为 `train_scbl_plus.py` / `run-SCBlendMask-plus.yaml`（保留历史） |
+| P2-12 | **真正接入 LSK** | Lcspvig 的 4 个 transition 层改用 `BN_LSKb_act`，参数量 4.14M → **4.53M**；新增 `MODEL.VIG.USE_LSK` 开关 |
+| P2-13 | **注意力配置化** | 新增 `MODEL.BASIS_MODULE.ATTN: none/gc/cbam/ca`。`ca.py` 已从"需固定 h/w 的死代码"改造为支持动态分辨率 |
+| P2-15 | 修 `padding=1` | 改为 `padding=0` |
+| P2-16 | **BiFPN 显存优化** | `torch.stack(nodes, -1)` 改为逐路加权累加；实测数值偏差 **0.0**，峰值显存省约 **10%** |
+| P2-17 | 修 `dpr` 分配 | 原实现 global stage 的 `Grapher` 与 `FFN` **共用**同一个 drop rate（local stage 则每个 block 一个，两者不一致）。现改为各占一个，`n_blocks` 同步按 `2 * sum(global_blocks)` 计 |
+| 新增 | **修复配置文件编码** | fvcore 读 yaml 未指定 encoding，依赖 locale。已在 `adet/config/defaults.py` 显式 UTF-8，locale 为 C/POSIX 的服务器也能读中文注释的 yaml |
+| 新增 | **修复训练脚本导入** | `tools/train_bl+.py` 与 `train_scbl_plus.py` 导入不存在的 `adet.data.fcpose_dataset_mapper`，一运行就 `ModuleNotFoundError`。已改为 BlendMask 实际需要的 `DatasetMapperWithBasis` |
+| 新增 | **兼容 rapidfuzz 3.x** | `adet/evaluation/text_eval_script.py` 用 `rapidfuzz.string_metric`，3.x 已移除。改为 `rapidfuzz.distance.Levenshtein` 并保留旧版回退 |
+| 新增 | **修复 CA 在非正方形特征图上崩溃** | `ca.py` 的 `split` 顺序写反。正方形输入不报错，非正方形会崩；此前冒烟测试用正方形输入未暴露，真实训练（多尺度）才触发 |
 
-### P1 —— 工程健壮性
+### 待办 —— 需要训练数据或实验才能定论
 
-8. **数据集与设备全部外置**：用 `--opts` 或环境变量（已支持 `GBADMASK_DATA_ROOT`）注入路径；把 `json.load(open(TRAIN_JSON))` 从模块级挪进 `register_dataset()`，做到"数据不在也能 import"；`CUDA_VISIBLE_DEVICES` 改由命令行 / 环境控制。
-9. **补 `setup.py` 依赖**：缺 `timm`（必须锁 `<1.0`，否则 `cspvig.py` 的 `ConvBnAct` import 失败）、`rapidfuzz`（`adet/evaluation/text_eval_script.py` 依赖，训练脚本会 `from adet.evaluation import TextEvaluator`）、`omegaconf`（detectron2 v0.6 依赖）。建议补一份 `requirements.txt` 与 `environment.yml`，把本文 5.2 节测通的版本组合固化下来。
-10. **清理死代码**：`blendmask/build.py`、`ca.py`、`cbam.py`、`dice_loss.py`、`ND_Crossentropy.py`、`simam_module`、`cspvig.py` 里未使用的 `numpy` / timm import。`torch-stat.py` 重命名为 `torch_stat.py` 或移入 `util/`。
-    另外 `adet/data/builtin.py` 与 `util/`（11 个脚本）里还留着大量上游 **ABCNet / 越南语文本检测**的数据集注册与处理代码，与本项目完全无关，建议一并清理，避免 `import adet` 时注册一堆用不到的数据集。
-11. **修文件名空格**：`tools/train_scbl+ .py` → `tools/train_scbl_plus.py`，`configs/run-SCBlendMask+ .yaml` → `configs/run-SCBlendMask-plus.yaml`，避免 shell 转义问题。
-
-### P2 —— 效果与性能
-
-12. **真正接入 LSK**：把 `BN_LSKb_act` 用到 `Lcspvig.MobileViG` 的 stage 输出或 BiFPN 的融合节点，否则 SC 变体与基线无差异；同时补一组 cspvig vs Lcspvig 的消融实验确认收益。
-13. **GC block 的位置与数量需要消融**：目前 `basis_module2` 里插了 2 个 GC block（低层 24ch 分支 + tower 开头），但没有任何对照实验。建议拆成"仅低层 GC""仅 tower GC""都加"三档，另外把 `cbam.py` / `ca.py` 作为可替换项做横向对比（`MODEL.BASIS_MODULE.ATTN: "gc" / "cbam" / "ca" / "none"` 配置化）。
+13. **消融实验验证收益**：现在开关都已就位，建议按以下顺序跑（每组只需改 1~2 个字段）：
+    - **basis 模块**：`run-vig.yaml`（ProtoNet）vs `run-BlendMask2-vig.yaml`（ProtoNetV2）
+    - **骨干**：`run-BlendMask2-vig.yaml`（MobileViG）vs `run-SCBlendMask-plus.yaml`（Lcspvig，含 LSK）
+    - **LSK 本身**：`run-SCBlendMask-plus.yaml` 配 `MODEL.VIG.USE_LSK: False` 与 `True` 对比
+    - **注意力类型**：`MODEL.BASIS_MODULE.ATTN` 取 `none` / `gc` / `cbam` / `ca` 四档
+    四组都可通过 `--opts` 覆盖，无需新增配置文件。
 14. **FDC 损失的超参需要标定**：`gamma=0.75`、`0.8*CE + 0.2*(Dice+1)` 这组权重目前是拍的；`SoftDiceLoss` 默认 `batch_dice=False`、`do_bg=True`，在实例分割的极端不平衡场景下建议试 `do_bg=False`；另外 `DC_and_CE_loss.forward` 里 `target.view((-1,1))` 在 `weight` 为 tensor 的分支下才用到，目前 `weight=1` 恒为标量，该分支是死代码。
-15. **修正 `basis_module2.py:78` 的 `padding=1`**，改为 `padding=0`，避免无谓的分辨率偏移。
-16. **BiFPN 通道数过大**：`OUT_CHANNELS=160` + `NUM_REPEATS=6` 对单卡 3090 的显存压力不小。建议先试 `OUT_CHANNELS=96~128`、`NUM_REPEATS=3~4` 的组合做吞吐/精度权衡；另外 `SingleBiFPN.forward` 里 `torch.stack(input_nodes, dim=-1)` 会显式物化 `[B,C,H,W,n]` 的五维张量，是显存热点，可改成逐路加权累加或 `w1*x1 + w2*x2` 的展开写法。
-17. **ViG 骨干的 `dpr` 分配有 bug**：`cspvig.py:326-331` 中 global stage 的循环里 `dpr_idx += 1` 在 `for j in range(global_blocks[0])` **循环体内部**，但每次迭代用的是同一个 `dpr[dpr_idx]`（因为 `+=1` 在 append 之后），导致同一个 stage 内所有 block 共享同一个 drop rate，且后续 stage 索引计算偏移。应改为每个 block 递增。
-18. **加载 ImageNet 预训练**：`cspvig` 目前是随机初始化（`_initialize_weights`），`run-vig.yaml` 里 `MODEL.WEIGHTS` 指向 MobileViG 预训练权重的那行被注释掉了。解析 MobileViG 的 `state_dict` 做骨干初始化，通常比从头训练收敛快很多、精度也更高。
-19. **训练策略**：`SOLVER.STEPS=(60000, 80000)` + `MAX_ITER=90000` 是 COCO 的 3× 配置，对小数据集（草莓/植株）严重过配，建议 `MAX_ITER=20000~30000`、`STEPS` 按 0.6/0.8 比例调整，并启用 `INPUT.MIN_SIZE_TRAIN` 的多尺度增强；`IMS_PER_BATCH=6` + `BASE_LR=0.001` 也不是 8 卡线性缩放后的值（官方 16 图对应 0.01），单卡 6 图建议 `BASE_LR≈0.0025` 起调。
-20. **评估与可视化**：`TEST.EVAL_PERIOD=5000` 偏大，调试期建议调到 1000；`tools/visualize_data.py` 已存在，建议训练前先跑一遍确认标注与 `basis_sem` 正确。
-21. **推理部署**：`onnx/` 目录已有导出脚本，但未见针对 ViG 骨干（`MRConv4d` 的动态 `max` 图卷积）的算子验证。ONNX 导出前建议先把 `MRConv4d` 的循环展开成固定数次 `torch.max`，否则 `loop` 节点在很多推理后端上不支持。
+15. **BiFPN 通道数**：`OUT_CHANNELS=160` + `NUM_REPEATS=6` 显存压力不小，可试 `96~128` / `3~4` 的组合作吞吐-精度权衡（已实测：512×512 + LOSS_ON 训练峰值约 0.9 GB，余量充足，实际可先按大 batch 跑）。
+16. **加载 ImageNet 预训练**：`cspvig` 目前是随机初始化（`_initialize_weights`），`run-vig.yaml` 里 `MODEL.WEIGHTS` 指向 MobileViG 权重的那行被注释掉了。解析 MobileViG 的 `state_dict` 做骨干初始化，通常收敛更快、精度更高。
+17. **训练策略**：`SOLVER.STEPS=(60000, 80000)` + `MAX_ITER=90000` 是 COCO 的 3× 配置，对小数据集（草莓/植株）可能过配，建议 `MAX_ITER=20000~30000`、`STEPS` 按 0.6/0.8 比例调整；`IMS_PER_BATCH=6` + `BASE_LR=0.001` 也不是线性缩放值（官方 16 图对应 0.01），单卡 6 图建议 `BASE_LR≈0.0025` 起调。**建议在数据集就绪后按实际收敛曲线调**。
+18. **评估与可视化**：`TEST.EVAL_PERIOD=5000` 偏大，调试期建议 1000；训练前先跑 `tools/visualize_data.py` 确认标注正确。
+19. **推理部署**：`onnx/` 目录已有导出脚本，但未见针对 ViG 骨干（`MRConv4d` 的动态 `max` 图卷积）的算子验证。ONNX 导出前建议先把 `MRConv4d` 的循环展开成固定数次 `torch.max`，否则 `loop` 节点在很多推理后端上不支持。
+20. **可选清理**：`adet/data/builtin.py` 与 `util/`（11 个脚本）里还留着上游 **ABCNet / 越南语文本检测**的数据集注册与处理代码，与本项目无关。清理可减少 `import adet` 时注册的无用数据集，但涉及面较广，建议单独一次改动后重新编译验证。
 
 ---
 
