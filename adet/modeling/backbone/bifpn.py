@@ -246,8 +246,13 @@ class SingleBiFPN(Backbone):
             weights = F.relu(self.__getattr__(name))
             norm_weights = weights / (weights.sum() + 0.0001)
 
-            new_node = torch.stack(input_nodes, dim=-1)
-            new_node = (norm_weights * new_node).sum(dim=-1)
+            # 逐路加权累加，等价于 (norm_weights * torch.stack(nodes, -1)).sum(-1)，
+            # 但避免了显式物化 [B, C, H, W, n] 的五维中间张量 —— 该张量在高分辨率层
+            # （如 p3，160 通道 × 1/8 分辨率）上会额外占用 n 倍显存，是训练时的显存热点。
+            new_node = None
+            for w, node in zip(norm_weights.unbind(), input_nodes):
+                term = node * w
+                new_node = term if new_node is None else new_node + term
             new_node = swish(new_node)
 
             name = "outputs_f{}_{}".format(feat_level, inputs_offsets_str)

@@ -1,13 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn import Sequential as Seq
 
-import numpy
-
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.models.layers import DropPath, ConvBnAct
-from timm.models.registry import register_model
+from timm.models.layers import DropPath
 
 from detectron2.modeling.backbone.build import BACKBONE_REGISTRY
 from detectron2.modeling.backbone import Backbone
@@ -286,7 +281,9 @@ class MobileViG(Backbone):
         self.distillation = distillation
         self.out_indices = out_indices
         
-        n_blocks = sum(global_blocks) + sum(local_blocks)
+        # global stage 里每个 block 由 Grapher + FFN 两个子模块组成，
+        # 各自占用一个 drop rate，因此按 2 倍计数（与下方 dpr_idx += 2 对应）。
+        n_blocks = sum(local_blocks) + 2 * sum(global_blocks)
         dpr = [x.item() for x in torch.linspace(0, drop_path, n_blocks)]  # stochastic depth decay rule 
         dpr_idx = 0
 
@@ -324,11 +321,12 @@ class MobileViG(Backbone):
 
         backbone = []
         for j in range(global_blocks[0]):
+            # Grapher 与 FFN 各用一个 drop rate，末尾各 +1（原实现两者共用同一个）
             backbone += [nn.Sequential(
                                 Grapher(global_channels[0]//2, drop_path=dpr[dpr_idx], K=K),
-                                FFN(global_channels[0]//2, global_channels[0]//2* 4, drop_path=dpr[dpr_idx]))
+                                FFN(global_channels[0]//2, global_channels[0]//2* 4, drop_path=dpr[dpr_idx + 1]))
                                 ]
-            dpr_idx += 1
+            dpr_idx += 2
         backbone.append(BN_Conv2d_act(global_channels[0]//2, global_channels[0]//2, 1, 1,0))
         self.add_module('backbone', nn.Sequential(*backbone))
 

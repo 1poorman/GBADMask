@@ -1,13 +1,8 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn import Sequential as Seq
 
-import numpy
-
-from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from timm.models.layers import DropPath, ConvBnAct
-from timm.models.registry import register_model
+from timm.models.layers import DropPath
 
 from detectron2.modeling.backbone.build import BACKBONE_REGISTRY
 from detectron2.modeling.backbone import Backbone
@@ -323,21 +318,36 @@ class BN_LSKb_act(nn.Module):
         return self.seq(x)
     
 class MobileViG(Backbone):
+    """MobileViG + LSK（Large Selective Kernel）大核选择注意力。
+
+    与 ``cspvig.MobileViG`` 的区别：四个 stage 的 transition 层由
+    ``BN_Conv2d_act`` 换成 ``BN_LSKb_act``（Conv → LSKblock → BN → Hardswish），
+    使每个尺度在输出前先做一次空间选择性的大核注意力加权。
+
+    用 ``use_lsk=False`` 可退回普通 transition，便于做 cspvig 与 Lcspvig 的消融。
+    """
+
     def __init__(self,  local_blocks, local_channels,
                  global_blocks, global_channels,
                  dropout=0., drop_path=0., emb_dims=512,
                  K=2, distillation=True, num_classes=1000,
-                  out_indices=None):
+                  out_indices=None, use_lsk=True):
         super(MobileViG, self).__init__()
 
         self.distillation = distillation
         self.out_indices = out_indices
-        
-        n_blocks = sum(global_blocks) + sum(local_blocks)
+        self.use_lsk = use_lsk
+
+        # global stage 里每个 block 由 Grapher + FFN 两个子模块组成，
+        # 各自占用一个 drop rate，因此按 2 倍计数（与下方 dpr_idx += 2 对应）。
+        n_blocks = sum(local_blocks) + 2 * sum(global_blocks)
         dpr = [x.item() for x in torch.linspace(0, drop_path, n_blocks)]  # stochastic depth decay rule 
         dpr_idx = 0
 
         self.stem = Stem(input_dim=3, output_dim=local_channels[0])
+
+        # transition 层：use_lsk=True 时插入 LSKblock 做空间选择性大核加权
+        trans = BN_LSKb_act if use_lsk else BN_Conv2d_act
 
         local_backbone1 = []
         for _ in range(local_blocks[0]):
@@ -346,7 +356,7 @@ class MobileViG(Backbone):
         local_backbone1.append(BN_Conv2d_act(local_channels[0]//2, local_channels[0]//2, 1, 1,0))
         self.add_module('local_backbone1', nn.Sequential(*local_backbone1))
 
-        self.transition1 = BN_Conv2d_act(local_channels[0], local_channels[0], 1, 1,0)
+        self.transition1 = trans(local_channels[0], local_channels[0], 1, 1, 0)
         self.down1 = Downsample(local_channels[0], local_channels[1])
 
         local_backbone2 = []
@@ -356,7 +366,7 @@ class MobileViG(Backbone):
         local_backbone2.append(BN_Conv2d_act(local_channels[1]//2, local_channels[1]//2, 1, 1,0))
         self.add_module('local_backbone2', nn.Sequential(*local_backbone2))
 
-        self.transition2 = BN_Conv2d_act(local_channels[1], local_channels[1], 1, 1,0)
+        self.transition2 = trans(local_channels[1], local_channels[1], 1, 1, 0)
         self.down2 = Downsample(local_channels[1], local_channels[2])
 
         local_backbone3 = []
@@ -366,20 +376,21 @@ class MobileViG(Backbone):
         local_backbone3.append(BN_Conv2d_act(local_channels[2]//2, local_channels[2]//2, 1, 1,0))
         self.add_module('local_backbone3', nn.Sequential(*local_backbone3))
 
-        self.transition3 = BN_Conv2d_act(local_channels[2], local_channels[2], 1, 1,0)
+        self.transition3 = trans(local_channels[2], local_channels[2], 1, 1, 0)
         self.down3 = Downsample(local_channels[2], global_channels[0])
 
         backbone = []
         for j in range(global_blocks[0]):
+            # Grapher 与 FFN 各用一个 drop rate，末尾各 +1（原实现两者共用同一个）
             backbone += [nn.Sequential(
                                 Grapher(global_channels[0]//2, drop_path=dpr[dpr_idx], K=K),
-                                FFN(global_channels[0]//2, global_channels[0]//2* 4, drop_path=dpr[dpr_idx]))
+                                FFN(global_channels[0]//2, global_channels[0]//2* 4, drop_path=dpr[dpr_idx + 1]))
                                 ]
-            dpr_idx += 1
-        backbone.append(BN_Conv2d_act(global_channels[0]//2, global_channels[0]//2, 1, 1,0))
+            dpr_idx += 2
+        backbone.append(BN_Conv2d_act(global_channels[0]//2, global_channels[0]//2, 1, 1, 0))
         self.add_module('backbone', nn.Sequential(*backbone))
 
-        self.transition4 = BN_Conv2d_act(global_channels[0], global_channels[0], 1, 1,0)
+        self.transition4 = trans(global_channels[0], global_channels[0], 1, 1, 0)
 
         self._initialize_weights()
 
@@ -452,7 +463,8 @@ def build_Lcspvigm_backbone(cfg, input_shape):
                     K=2,
                     distillation=True,
                     num_classes=1000,
-                    out_indices=[2, 6, 16, 20])
+                    out_indices=[2, 6, 16, 20],
+                    use_lsk=cfg.MODEL.VIG.USE_LSK)
 
     out_features = cfg.MODEL.RESNETS.OUT_FEATURES
     out_feature_channels = {"res2": 42, "res3": 84,
