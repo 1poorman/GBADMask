@@ -1,0 +1,51 @@
+# Strawberry 草莓病害实例分割实验配置
+#
+# 数据集：datasets/_dl/Strawberry（7 个可检测 thing 类 + 1 个背景类 _background_，
+#         1750 train / val 划分（无 test），全部 419x419 正方形图）
+#   _background_ 已在 tools/register_datasets.build_meta 里自动剔除，
+#   因此 thing_classes 为 7 类（与 NUM_CLASSES=7 一致）。
+#
+# 沿用 run-wheat.yaml 的建模与超参风格（仅 backbone / basis 模块为实验变量由命令行覆盖）。
+# 切数据集只需把 DATASETS.NAME 改成 "Strawberry"（或命令行 --dataset Strawberry）。
+#
+# 注意：BASIS_MODULE.LOSS_ON 保持 False（Base-BlendMask-BiFPN.yaml 第 5-8 行明确要求
+# 自定义数据集显式关闭，否则 dataloader 报 FileNotFoundError）。数据集虽自带
+# thing_train2017/*.npz，但其像素值约定需先核对再开启语义监督。
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  BACKBONE:
+    NAME: "build_fcos_cspvig_bifpn_backbone"
+  VIG:
+    USE_LSK: False
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    NUM_REPEATS: 3
+    NORM: "GN"
+  BASIS_MODULE:
+    ATTN: "gc"
+    LOSS_ON: False         # Strawberry 自定义数据集，按 base 配置要求关闭语义监督
+    NUM_CLASSES: 7         # 与数据集 thing 类别数一致（剔除 _background_ 后）
+  FCOS:
+    NUM_CLASSES: 7
+DATASETS:
+  # 只写名称：自动注册 Strawberry_{train,val}（无 test）并填充 TRAIN/TEST
+  NAME: "Strawberry"
+SOLVER:
+  IMS_PER_BATCH: 8
+  BASE_LR: 0.005          # 按 实际batch/16 * 0.01 线性缩放：8/16*0.01 = 0.005
+  WARMUP_ITERS: 200
+  # 1 epoch = ceil(1750/8) = 219 iter。按小麦的 60/80/101 epoch 对齐：
+  #   60*219=13140，80*219=17520，101*219≈22119
+  STEPS: (13100, 17500)
+  MAX_ITER: 22000
+  CHECKPOINT_PERIOD: 4000
+INPUT:
+  # 全部 419x419 正方形，短边多尺度做尺度增广，长边封顶 512
+  MIN_SIZE_TRAIN: (384, 416, 448)
+  MIN_SIZE_TEST: 416
+  MAX_SIZE_TRAIN: 512
+  MAX_SIZE_TEST: 512
+TEST:
+  EVAL_PERIOD: 4000
+OUTPUT_DIR: "output/strawberry"

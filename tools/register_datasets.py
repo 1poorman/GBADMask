@@ -54,7 +54,11 @@ from base import (  # noqa: E402  需先补 sys.path 才能 import 同目录的 
 # 数据集别名：名称 -> 相对 datasets/ 的目录。用于目录名与数据集名不一致的情况，
 # 绝大多数数据集目录名即数据集名，靠 base.resolve_dataset_dir 自动找到即可。
 DATASET_ALIASES = {
-    # "Strawberry": "Strawberry",
+    "wheat_seg": "HBueHxOW/wheat_seg",
+    "wheat_seg_clean": "HBueHxOW/wheat_seg_clean",
+    # 新上传的数据集放在 _dl 下（扫描会跳过 _dl），用别名显式指向
+    "Plantv2": "_dl/Plantv2",
+    "Strawberry": "_dl/Strawberry",
 }
 
 # 数据集类别数不一致时需要同步改的 config key
@@ -76,10 +80,14 @@ def build_meta(json_file):
     类别顺序沿用 json 中的顺序，并为每个类别生成可视化用的颜色。
     """
     with open(json_file, "r") as f:
-        categories = json.load(f)["categories"]
+        raw = json.load(f)["categories"]
+
+    # 跳过语义背景类（如 "_background_"，category_id 通常为 0）：它不是可检测的 thing。
+    # COCO / wheat 无此类别，跳过对它们无影响；Plantv2/Strawberry 有，必须剔除。
+    categories = [c for c in raw if c.get("name", "").lower() != "_background_"]
 
     n = max(len(categories), 1)
-    hsv = [(i / n, 1, 1.0) for i in range(len(categories))]
+    hsv = [(i / n, 1, 1.0) for i in range(n)]
     colors = (np.array([colorsys.hsv_to_rgb(*c) for c in hsv]) * 255).astype("uint8")
 
     thing_ids, thing_classes, thing_colors = [], [], []
@@ -261,7 +269,7 @@ if __name__ == "__main__":
             print("  （无）先用 datasets/prepare_*.py 生成 COCO 格式数据")
             sys.exit(1)
         for n in found:
-            print("  {:<16} {}".format(n, resolve_dataset_dir(n)))
+            print("  {:<16} {}".format(n, resolve_dataset_dir(DATASET_ALIASES.get(n, n))))
         sys.exit(0)
 
     for name in args:

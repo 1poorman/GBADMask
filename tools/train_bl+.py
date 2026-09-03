@@ -68,7 +68,7 @@ from adet.evaluation import TextEvaluator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import base                                            # noqa: E402
 from base import setup_env, DATASETS_DIR               # noqa: E402
-from register_datasets import apply_dataset, list_datasets  # noqa: E402
+from register_datasets import apply_dataset, list_datasets, DATASET_ALIASES  # noqa: E402
 
 setup_env()
 
@@ -283,7 +283,7 @@ def cli(argv=None):
         if not found:
             print("  （无）先用 datasets/prepare_*.py 生成 COCO 格式数据")
         for name in found:
-            print("  {:<16} {}".format(name, base.resolve_dataset_dir(name)))
+            print("  {:<16} {}".format(name, base.resolve_dataset_dir(DATASET_ALIASES.get(name, name))))
         return
 
     print("Command Line Args:", args)
