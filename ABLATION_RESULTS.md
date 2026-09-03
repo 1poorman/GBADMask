@@ -140,6 +140,39 @@ cudnn.benchmark 修复后噪声有所降低（base s42 仅差 0.10），但 **GP
 4. **多 seed 成本**：本实验 23 组 ≈ 9.5 GPU 时。若要达到 p<0.05 的检验效力
    （检测 0.5 AP 差异），每组需 8-10 seed。
 
+## 七、R50 强平台实验（2026-09-03 追加，M1）
+
+**背景**：弱平台（cspvig 9.9M、无预训练）噪声 ±1~2 AP，掩盖模块效应。
+改用官方骨干 R50+FPN（27.3M，ImageNet 预训练）在同一数据集（wheat_seg_clean）
+重跑，8000 iter、seed 42：
+
+| 组 | bbox AP | segm AP | 说明 |
+| --- | --- | --- | --- |
+| `r50-protonet`（官方 basis） | 18.91 | 15.36 | 平台天花板参照 |
+| `r50-v2`（ProtoNetV2） | 20.05 | **16.68** | **+1.14 bbox / +1.32 segm** |
+
+**三个关键发现**：
+
+1. **数据集不是瓶颈**（回答"是否需要更长训练"）：R50 在 2000 iter 时 segm 已达
+   14.5，超过 cspvig 跑满 4000 iter 的 6.8 —— 卡住 cspvig 的是**骨干容量与预训练**，
+   不是训练时长或数据。
+2. **ProtoNetV2 的效应在强平台显现**：+1.32 segm / +1.14 bbox，方向与弱平台一致
+   （弱平台 +0.39 但不显著），幅度更大。此前"所有组件都无差异"的表象，
+   实为测量平台灵敏度不足所致。
+3. **cspvig 作为主干当前不可用**：其架构贡献（图卷积 + CSP）在无预训练时远逊于
+   ResNet50 的 ImageNet 先验。继续用 cspvig 前必须先解决预训练（ROADMAP M2）。
+
+**单 seed 警告**：+1.32 与弱平台测得的批次噪声（±1~2）量级相当，尚不能排除
+运气成分。**正式结论需 M4 的 3 seed 配对 t 检验**（详见 ROADMAP.md）。
+
+**工程记录**：
+- R-50.pkl 已缓存至 `~/.torch/iopath_cache/detectron2/ImageNetPretrained/MSRA/`
+- Plantv2 / Strawberry 数据集已就位（7916/1750 train）；其 json 原带 id=0 的
+  `_background_` 占位类，与 detectron2 懒加载口径冲突（AssertionError），
+  已用 `datasets/clean_background_class.py` 清洗（原 json 备份 `.bak`）。
+  NUM_CLASSES 口径：Plantv2=16、Strawberry=7。
+- Plantv2 + R50 冒烟通过（40 iter，loss 2.656 正常）。
+
 ## 七、产物位置
 
 - 各组权重与日志：`output/ab-*/`（约 5.4 GB，23 组）
