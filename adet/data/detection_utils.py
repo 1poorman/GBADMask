@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from detectron2.data import transforms as T
+from .augmentation import RandomScaleCrop
 from detectron2.data.detection_utils import \
     annotations_to_instances as d2_anno_to_inst
 from detectron2.data.detection_utils import \
@@ -90,7 +91,16 @@ def build_augmentation(cfg, is_train):
     logger = logging.getLogger(__name__)
 
     augmentation = []
-    augmentation.append(T.ResizeShortestEdge(min_size, max_size, sample_style))
+    if is_train and cfg.INPUT.LSJ.ENABLED:
+        # Large Scale Jittering：随机缩放 + 固定尺寸随机裁剪（取代常规多尺度 resize）
+        augmentation.append(
+            RandomScaleCrop(
+                scale_range=tuple(cfg.INPUT.LSJ.SCALE_RANGE),
+                crop_size=tuple(cfg.INPUT.LSJ.CROP_SIZE),
+            )
+        )
+    else:
+        augmentation.append(T.ResizeShortestEdge(min_size, max_size, sample_style))
     if is_train:
         if cfg.INPUT.HFLIP_TRAIN:
             augmentation.append(T.RandomFlip())

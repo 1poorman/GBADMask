@@ -1,6 +1,6 @@
 # Strawberry 草莓病害实例分割实验配置
 #
-# 数据集：datasets/_dl/Strawberry（7 个可检测 thing 类 + 1 个背景类 _background_，
+# 数据集：datasets/Strawberry（7 个可检测 thing 类 + 1 个背景类 _background_，
 #         1750 train / val 划分（无 test），全部 419x419 正方形图）
 #   _background_ 已在 tools/register_datasets.build_meta 里自动剔除，
 #   因此 thing_classes 为 7 类（与 NUM_CLASSES=7 一致）。

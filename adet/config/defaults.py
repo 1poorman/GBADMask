@@ -32,6 +32,27 @@ _C.INPUT.CROP.CROP_INSTANCE = True
 # _C.INPUT.CROP.ENABLED = False
 
 # ---------------------------------------------------------------------------- #
+# Copy-Paste 数据增广（ROADMAP M6.2 A1）
+#   从训练集惰性构建 donor 池，每张图以 PROB 概率粘贴若干实例，提升小目标/稀少
+#   实例召回。粘贴发生在标准增广之前，与增广天然同步。
+# ---------------------------------------------------------------------------- #
+_C.INPUT.COPYPASTE = CN()
+_C.INPUT.COPYPASTE.ENABLED = False
+_C.INPUT.COPYPASTE.PROB = 0.5           # 每张训练图触发粘贴的概率
+_C.INPUT.COPYPASTE.MAX_DONORS = 8       # 单次最多粘贴实例数
+_C.INPUT.COPYPASTE.NUM_SAMPLES = 2000  # donor 池采样实例数（启动建池用）
+
+# ---------------------------------------------------------------------------- #
+# Large Scale Jittering（LSJ，ROADMAP M6.2 A1）
+#   对农作物小图采用保守范围：原版 [0.1, 2.0] 会过度破坏小目标。
+#   启用后取代常规多尺度 resize，先做随机缩放再做固定尺寸随机裁剪。
+# ---------------------------------------------------------------------------- #
+_C.INPUT.LSJ = CN()
+_C.INPUT.LSJ.ENABLED = False
+_C.INPUT.LSJ.SCALE_RANGE = (0.3, 1.5)   # 随机缩放因子区间
+_C.INPUT.LSJ.CROP_SIZE = (640, 640)     # 缩放后随机裁剪的目标尺寸 (h, w)
+
+# ---------------------------------------------------------------------------- #
 # 数据集
 # ---------------------------------------------------------------------------- #
 # 数据集**名称**（不是路径）。非空时 tools/register_datasets.py 会自动
@@ -166,6 +187,16 @@ _C.MODEL.VIG.CSP_STYLE = "c3"
 # bottleneck 中间深度卷积的 kernel size（C3K 风格）。
 # 3 = 原实现；5 / 7 可扩大感受野，对病斑这类区域型目标可能更有效。
 _C.MODEL.VIG.MID_KERNEL = 3
+# MobileViGv2 + C3K2 融合骨干（cspvigv2.py）专用配置
+#   变体：ti / s / m / b（对应官方 mobilevigv2_{ti,s,m,b} 的 blocks / channels）
+_C.MODEL.VIG.VERSION = "s"
+# 预训练权重路径（官方 MobileViG_V2_*.pth，分类预训练）。
+#   空字符串 "" 表示随机初始化（从头训练）。加载时会用 state_dict_ema（优先）/ state_dict。
+_C.MODEL.VIG.PRETRAINED = ""
+# Drop path 比例（与官方训练配方一致；检测微调可调小或置 0）
+_C.MODEL.VIG.DROP_PATH = 0.1
+# 是否启用 C3K2（C2f 风格）多分支融合；False = 退化为原始 MobileViGv2 串行堆叠（消融用）
+_C.MODEL.VIG.USE_C3K2 = True
 
 # ---------------------------------------------------------------------------- #
 # Basis Module Options
@@ -174,7 +205,9 @@ _C.MODEL.BASIS_MODULE = CN()
 _C.MODEL.BASIS_MODULE.NAME = "ProtoNet"
 # basis 模块内部使用的注意力类型，仅 ProtoNetV2 支持。
 # 可选: "none"（不加注意力）, "gc"（GCNet 通道注意力）, "cbam"（通道+空间）,
-#       "ca"（Coordinate Attention）, "spatial"（纯空间注意力）
+#       "ca"（Coordinate Attention）, "spatial"（纯空间注意力）,
+#       "psa"（Position-Sensitive Attention / C2PSA，RT-DETR/YOLO11 引入的近三年新组件）,
+#       "ema"（Efficient Multi-Scale Attention，ICASSP 2023 跨空间学习注意力）
 # gc 与 spatial 构成对照，用于判断 bases 更需要通道还是空间能力。
 _C.MODEL.BASIS_MODULE.ATTN = "gc"
 # 是否给 bases 输入拼接 2 通道归一化相对坐标图（CondInst 验证过的技巧）。

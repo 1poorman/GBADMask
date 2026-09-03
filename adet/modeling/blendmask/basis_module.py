@@ -12,6 +12,8 @@ from .ca import CA_Block
 from .cbam import CBAMLayer
 from .GCblock import GlobalContextBlock
 from .spatial_attn import SpatialAttention
+from .psa import PSA
+from .ema import EMA
 from .advanced_losses import BasisSemHeadWrapper, build_sem_loss
 
 
@@ -41,10 +43,15 @@ def build_attention(name, channels):
     ``cbam``     CBAM，通道 + 空间注意力串联
     ``ca``       Coordinate Attention，沿 H/W 分别编码位置信息
     ``spatial``  **纯空间**注意力（CBAM 的 spatial 分支单独抽出）
+    ``psa``      Position-Sensitive Attention（C2PSA 风格，RT-DETR/YOLO11
+                引入）。要求 channels 在注意力分支内可被 num_heads 整除。
+    ``ema``      Efficient Multi-Scale Attention（ICASSP 2023，跨空间学习），
+                1×1 跨空间 + 3×3 局部双分支，对小目标局部纹理友好。
     ============ ==========================================================
 
     ``gc`` 与 ``spatial`` 构成一组对照：前者只做通道重标定，后者只做空间
-    重标定，可用于判断 bases 更需要哪一类能力。
+    重标定，可用于判断 bases 更需要哪一类能力。``psa`` / ``ema`` 是近三年新组件，
+    在 basis tower 内部验证过有效（见 ROADMAP M6.2）。
     """
     if not name or name == "none":
         return nn.Identity()
@@ -57,9 +64,13 @@ def build_attention(name, channels):
         return CA_Block(channels)
     if name == "spatial":
         return SpatialAttention(channels)
+    if name == "psa":
+        return PSA(channels, channels)
+    if name == "ema":
+        return EMA(channels)
     raise ValueError(
         "未知的 MODEL.BASIS_MODULE.ATTN: {!r}，"
-        "可选 none/gc/cbam/ca/spatial".format(name)
+        "可选 none/gc/cbam/ca/spatial/psa/ema".format(name)
     )
 
 

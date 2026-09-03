@@ -16,6 +16,7 @@ from detectron2.data.detection_utils import SizeMismatchError
 from detectron2.structures import BoxMode
 
 from .augmentation import RandomCropWithInstance
+from .copypaste import apply_copy_paste, get_donor_pool
 from .detection_utils import (annotations_to_instances, build_augmentation,
                               transform_instance_annotations)
 
@@ -90,6 +91,24 @@ class DatasetMapperWithBasis(DatasetMapper):
             self.use_instance_mask = False
             self.recompute_boxes = False
 
+        # Copy-Paste 数据增广（ROADMAP M6.2 A1）
+        self.copypaste_enabled = cfg.INPUT.COPYPASTE.ENABLED and is_train
+        if self.copypaste_enabled:
+            from detectron2.data import DatasetCatalog
+
+            ds_name = cfg.DATASETS.TRAIN[0]
+            ds_dicts = DatasetCatalog.get(ds_name)
+            self.donor_pool = get_donor_pool(
+                ds_name, ds_dicts, cfg.INPUT.COPYPASTE.NUM_SAMPLES
+            )
+            self.cp_prob = cfg.INPUT.COPYPASTE.PROB
+            self.cp_max = cfg.INPUT.COPYPASTE.MAX_DONORS
+            # 每 worker 用不同 seed，保证各进程粘贴的 donor 不完全相同
+            self.cp_rng = random.Random(hash(ds_name) ^ 0x9E3779B9)
+            logging.getLogger(__name__).info(
+                "[CopyPaste] 已启用，donor 池大小 = %d", len(self.donor_pool.donors)
+            )
+
     def __call__(self, dataset_dict):
         """
         Args:
@@ -126,6 +145,18 @@ class DatasetMapperWithBasis(DatasetMapper):
             ).squeeze(2)
         else:
             sem_seg_gt = None
+
+        # Copy-Paste：在标准增广之前把 donor 实例粘贴进当前图，
+        # 这样粘贴进来的实例会一起参与后续的缩放/裁剪/翻转。
+        if self.copypaste_enabled:
+            image, dataset_dict["annotations"] = apply_copy_paste(
+                image,
+                dataset_dict["annotations"],
+                self.donor_pool,
+                prob=self.cp_prob,
+                max_donors=self.cp_max,
+                rng=self.cp_rng,
+            )
 
         boxes = np.asarray(
             [

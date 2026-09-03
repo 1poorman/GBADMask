@@ -1,6 +1,6 @@
 # PlantV2 植株病害实例分割实验配置
 #
-# 数据集：datasets/_dl/Plantv2（16 个可检测 thing 类 + 1 个背景类 _background_，
+# 数据集：datasets/Plantv2（16 个可检测 thing 类 + 1 个背景类 _background_，
 #         7916 train / val / test 划分，全部 256x256 正方形图）
 #   _background_ 已在 tools/register_datasets.build_meta 里自动剔除，
 #   因此 thing_classes 为 16 类（与 NUM_CLASSES=16 一致）。

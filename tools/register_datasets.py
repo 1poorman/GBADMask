@@ -56,9 +56,7 @@ from base import (  # noqa: E402  需先补 sys.path 才能 import 同目录的 
 DATASET_ALIASES = {
     "wheat_seg": "HBueHxOW/wheat_seg",
     "wheat_seg_clean": "HBueHxOW/wheat_seg_clean",
-    # 新上传的数据集放在 _dl 下（扫描会跳过 _dl），用别名显式指向
-    "Plantv2": "_dl/Plantv2",
-    "Strawberry": "_dl/Strawberry",
+    # Plantv2 / Strawberry 已移至 datasets/ 下（深度 1），可直接被扫描发现，无需别名。
 }
 
 # 数据集类别数不一致时需要同步改的 config key

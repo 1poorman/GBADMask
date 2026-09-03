@@ -1,10 +1,99 @@
 import random
 
+import cv2
 import numpy as np
 from fvcore.transforms import transform as T
 
-from detectron2.data.transforms import RandomCrop, StandardAugInput
+from detectron2.data.transforms import Augmentation, RandomCrop, StandardAugInput, Transform
 from detectron2.structures import BoxMode
+
+
+class RandomScaleCrop(Augmentation):
+    """Large Scale Jittering（LSJ）的轻量实现。
+
+    本仓库依赖的 detectron2 版本未提供 ``RandomScale``，故这里用单个
+    变换完成「随机缩放 + 固定尺寸随机裁剪」两步，等价于 LSJ 的核心行为：
+    先以均匀采样的因子 ``s ~ U(scale_min, scale_max)`` 缩放整图（保持长宽比），
+    再在缩放后的图上随机裁出 ``crop_size`` 大小的区域。
+
+    对农作物病害这类**小尺寸**图像，原版 LSJ 的 [0.1, 2.0] 范围会过度破坏
+    小目标，因此默认范围更保守（见 ``cfg.INPUT.LSJ``），由配置控制。
+
+    该变换同时作用于 image / segmentation / coords，与 detectron2 的
+    ``AugInput.apply_augmentations`` 管线兼容。
+    """
+
+    def __init__(self, scale_range=(0.3, 1.5), crop_size=(640, 640)):
+        super().__init__()
+        assert len(scale_range) == 2 and scale_range[0] <= scale_range[1]
+        self.scale_range = tuple(scale_range)
+        # crop_size: (h, w)
+        self.crop_size = tuple(crop_size)
+
+    def get_transform(self, img):
+        return _ScaleCropTransform(self.scale_range, self.crop_size)
+
+
+class _ScaleCropTransform(Transform):
+    def __init__(self, scale_range, crop_size):
+        super().__init__()
+        self._h, self._w = crop_size  # (H, W)
+        rng = np.random
+        s = float(rng.uniform(*scale_range))
+        self._s = s
+        self._new_h, self._new_w = int(round(s * self._h)), int(round(s * self._w))
+        # 缩放后可能比 crop 目标大（随机裁剪）或小（填充），两种情况分别处理
+        if self._new_h >= self._h and self._new_w >= self._w:
+            # 缩放后更大：在缩放图上随机裁出 crop 区域
+            self._mode = "crop"
+            self._x0 = int(rng.randint(0, self._new_w - self._w + 1))
+            self._y0 = int(rng.randint(0, self._new_h - self._h + 1))
+            self._px = self._py = 0
+        else:
+            # 缩放后更小：填充到 crop 尺寸，并把缩放图随机摆在画布内
+            self._mode = "pad"
+            self._px = int(rng.randint(0, max(0, self._w - self._new_w) + 1))
+            self._py = int(rng.randint(0, max(0, self._h - self._new_h) + 1))
+            self._x0 = self._y0 = 0
+
+    def _place(self, resized, is_seg):
+        C = resized.shape[2] if resized.ndim == 3 else 1
+        if self._mode == "crop":
+            return resized[self._y0 : self._y0 + self._h, self._x0 : self._x0 + self._w]
+        # pad：把缩放图贴到零画布的随机位置
+        canvas = np.zeros((self._h, self._w, C) if C > 1 else (self._h, self._w),
+                          dtype=resized.dtype)
+        canvas[self._py : self._py + self._new_h, self._px : self._px + self._new_w] = resized
+        return canvas
+
+    def apply_image(self, img):
+        if img.ndim == 3:
+            resized = cv2.resize(
+                img, (self._new_w, self._new_h), interpolation=cv2.INTER_LINEAR
+            )
+        else:
+            resized = cv2.resize(
+                img, (self._new_w, self._new_h), interpolation=cv2.INTER_NEAREST
+            )
+        return self._place(resized, is_seg=False)
+
+    def apply_segmentation(self, seg):
+        resized = cv2.resize(
+            seg.astype(np.uint8),
+            (self._new_w, self._new_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        return self._place(resized, is_seg=True)
+
+    def apply_coords(self, coords):
+        coords = coords * self._s
+        if self._mode == "crop":
+            coords[:, 0] -= self._x0
+            coords[:, 1] -= self._y0
+        else:
+            coords[:, 0] += self._px
+            coords[:, 1] += self._py
+        return coords
 
 
 def gen_crop_transform_with_instance(crop_size, image_size, instances, crop_box=True):

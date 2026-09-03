@@ -1,0 +1,61 @@
+# cspvigv2（MobileViGv2 + C3K2）骨干对比实验配置
+#
+# 目的（对应 ROADMAP M6.1 骨干对决）：
+#   在小麦数据集上，把「带 ImageNet 预训练的 MobileViGv2+C3K2」与
+#   r50-protonet 基线（configs/run-wheat-r50.yaml，MAX_ITER 8000，segm AP 15.36）做
+#   严格可控的 A/B 对比。
+#
+# 公平性保证：本文件直接继承 Base 配置（与 run-wheat-r50.yaml 同一个 _BASE_），
+#   并显式复用 r50 锚点的 SOLVER 超参（IMS_PER_BATCH / BASE_LR / WARMUP_ITERS /
+#   STEPS / MAX_ITER），唯一变量就是「骨干 + Neck 组合」：
+#     r50 锚点   : R50 + FPN（官方）
+#     本配置     : cspvigv2-M + BiFPN（repeats=3, 160ch）
+#   其余（basis=ProtoNetV2+gc、数据、增广、评估）全部一致。
+#
+# 切换变体（命令行覆盖）：
+#   s 变体 : --opts MODEL.VIG.VERSION s MODEL.VIG.PRETRAINED weights/MobileViG_V2_S_Class.pth
+#   从零   : --opts MODEL.VIG.PRETRAINED ""   （USE_C3K2 保持 True 即原始 MobileViGv2 串行）
+# 注意：PRETRAINED 含变体字母（M/S/Ti），换 VERSION 时必须同步改 PRETRAINED。
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  BACKBONE:
+    NAME: "build_fcos_mobilevigv2_csp_bifpn_backbone"
+  RESNETS:
+    OUT_FEATURES: ["res3", "res4", "res5"]   # cspvigv2 骨干按此决定输出层
+  VIG:
+    VERSION: "m"                                  # ti / s / m / b
+    PRETRAINED: "weights/MobileViG_V2_M_Class.pth"
+    USE_C3K2: True                                # False = 退化为原始 MobileViGv2 串行（消融用）
+    DROP_PATH: 0.1
+  BiFPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+    OUT_CHANNELS: 160
+    NUM_REPEATS: 3
+    NORM: "GN"
+    UPSAMPLE: "nearest"
+    ATTN: "none"
+  BASIS_MODULE:
+    ATTN: "gc"
+    LOSS_ON: False         # 自定义数据集无 thing_train2017/*.npz 语义监督
+    NUM_CLASSES: 12        # 与 wheat_seg_clean 的 thing 类别数一致
+  FCOS:
+    NUM_CLASSES: 12
+DATASETS:
+  # 只写名称：自动注册 wheat_seg_clean_{train,val,test} 并填充 TRAIN/TEST
+  NAME: "wheat_seg_clean"
+SOLVER:
+  IMS_PER_BATCH: 8
+  BASE_LR: 0.005          # 8/16 * 0.01 线性缩放，与 r50 锚点一致
+  WARMUP_ITERS: 200
+  STEPS: (4800, 6400)      # 与 r50 锚点完全一致，保证 A/B 公平
+  MAX_ITER: 8000           # 与 r50 锚点（15.36）同为 8000 iter
+  CHECKPOINT_PERIOD: 2000
+INPUT:
+  MIN_SIZE_TRAIN: (320, 384, 448, 512, 576, 640)
+  MIN_SIZE_TEST: 512
+  MAX_SIZE_TRAIN: 800
+  MAX_SIZE_TEST: 800
+TEST:
+  EVAL_PERIOD: 2000
+OUTPUT_DIR: "output/vigv2m-pre"
