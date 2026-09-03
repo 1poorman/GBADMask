@@ -219,8 +219,11 @@ class SingleBiFPN(Backbone):
         _, _, h, w = x.size()
         if h == target_h and w == target_w:
             return x
-        if self.upsample == "dysample":
-            # 偏移预测网络与输入通道相关，按通道数缓存复用。
+        if (self.upsample == "dysample"
+                and target_h == 2 * h and target_w == 2 * w):
+            # DySample 仅支持精确 2× 上采样。BiFPN 的顶层特征（p6/p7）因 ceil
+            # 除法，相邻层尺寸比可能不是 2（如图宽 448: p7=4 -> p6=7，1.75×），
+            # 此时必须退回 nearest，否则融合时两侧张量尺寸不匹配。
             # 注意：这里是在首次 forward 时惰性创建，此时模型已被 .to(device)
             # 移到 GPU，而新建模块默认在 CPU，必须显式搬移，否则 GPU 训练报
             # "weight type (torch.FloatTensor) should be the same"。

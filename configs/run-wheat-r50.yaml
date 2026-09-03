@@ -1,0 +1,53 @@
+# 官方骨干基线：ResNet50 + FPN（与 BlendMask 官方一致）
+#
+# 目的：建立小麦数据集的"天花板"参照，回答两个问题：
+#   1. 数据集本身能支撑多高的 AP？（若 R50 也只有 ~10，说明数据/标注是瓶颈）
+#   2. cspvig 9.9M 无预训练骨干与 R50 27.3M 有预训练骨干的差距有多大？
+#
+# 与 configs/run-wheat.yaml 的差异（其余全部一致，保证可比）：
+#   - 骨干换回官方 build_fcos_resnet_fpn_backbone（R50 + FPN）
+#   - ResNet50 加载 ImageNet 预训练（MSRA R-50.pkl）
+#   - FPN 替代 BiFPN（官方默认组合）
+#
+# 用法:
+#   export GBADMASK_DATA_ROOT=$PWD/datasets/HBueHxOW/wheat_seg_clean
+#   python tools/train_bl+.py --config-file configs/run-wheat-r50.yaml --num-gpus 1 \
+#       MODEL.BASIS_MODULE.NAME ProtoNet
+_BASE_: "Base-BlendMask-BiFPN.yaml"
+MODEL:
+  META_ARCHITECTURE: "BlendMask"
+  # ImageNet 预训练（detectron2 自动下载并缓存；若网络不可达，先手动下载
+  # https://dl.fbaipublicfiles.com/detectron2/ImageNetPretrained/MSRA/R-50.pkl
+  # 放到 ~/.torch/iopath_cache/detectron2/ImageNetPretrained/MSRA/ 下）
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  BACKBONE:
+    NAME: "build_fcos_resnet_fpn_backbone"
+  RESNETS:
+    DEPTH: 50
+    OUT_FEATURES: ["res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res3", "res4", "res5"]
+  BASIS_MODULE:
+    ATTN: "gc"
+    LOSS_ON: False
+    NUM_CLASSES: 12
+  FCOS:
+    NUM_CLASSES: 12
+DATASETS:
+  TRAIN: ("wheat_seg_train",)
+  TEST: ("wheat_seg_val",)
+SOLVER:
+  IMS_PER_BATCH: 8
+  BASE_LR: 0.005
+  WARMUP_ITERS: 200
+  STEPS: (4800, 6400)
+  MAX_ITER: 8000
+  CHECKPOINT_PERIOD: 2000
+INPUT:
+  MIN_SIZE_TRAIN: (320, 384, 448, 512, 576, 640)
+  MIN_SIZE_TEST: 512
+  MAX_SIZE_TRAIN: 800
+  MAX_SIZE_TEST: 800
+TEST:
+  EVAL_PERIOD: 2000
+OUTPUT_DIR: "output/ab-r50"
