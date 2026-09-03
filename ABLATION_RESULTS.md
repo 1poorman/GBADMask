@@ -142,6 +142,13 @@ cudnn.benchmark 修复后噪声有所降低（base s42 仅差 0.10），但 **GP
 
 ## 七、R50 强平台实验（2026-09-03 追加，M1）
 
+> **⚠️ 数据集更正（2026-09-03 14:00 发现）**：下述 R50 两组实际训练于
+> **`wheat_seg`（631/90）**，并非本节原文所写的"同一数据集 wheat_seg_clean"
+> ——日志证据：`Loaded 631 images ... wheat_seg/annotations/`。且 `wheat_seg`
+> 含 30 组跨 split 同图泄漏（DATA.md 第 7 节），val 指标虚高。
+> 后果：15.36/16.68 不可与 wheat_seg_clean 上的任何结果直接比较；
+> M6.3 验收锚点由 followup 队列 R1 组（wheat_seg_clean, batch 7, seed 42）重建。
+
 **背景**：弱平台（cspvig 9.9M、无预训练）噪声 ±1~2 AP，掩盖模块效应。
 改用官方骨干 R50+FPN（27.3M，ImageNet 预训练）在同一数据集（wheat_seg_clean）
 重跑，8000 iter、seed 42：

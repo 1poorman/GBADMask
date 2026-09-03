@@ -1,22 +1,32 @@
 # -*- coding: utf-8 -*-
-"""汇总消融实验结果：从各 output/ab-*/log.txt 提取 AP，按配置分组统计均值±std。
+"""汇总消融实验结果：从各 output/*/log.txt 提取 AP，按配置分组统计均值±std。
 
 用法:
-    python tools/summarize_all.py [output_dir_prefix]
+    python tools/summarize_all.py [output_dir_prefix] [--ttest] [--base NAME]
+
+参数:
+    output_dir_prefix  输出目录前缀（默认 "output/ab-"；如 "output/m62_L1b_"）
+    --ttest            配对比较时输出 scipy 配对 t 检验（t 值与 p 值）
+    --base NAME        配对比较的参照配置名（默认 "base"；L1b 批次用 "P0"）
 
 输出:
     1. 逐次运行明细
     2. 按配置聚合（多 seed：均值 ± 标准差）
-    3. 与 base 的差异及可信度判断（基于配对 seed）
+    3. 与参照组的配对比较（相同 seed 的差值；--ttest 时附 t/p 值）
+
+示例:
+    # 旧 23 组消融（多 seed，配对检验）
+    python tools/summarize_all.py --ttest
+    # M6.2 L1b 批次（单 seed，锚点 P0）
+    python tools/summarize_all.py output/m62_L1b_ --base P0
 """
+import argparse
 import glob
 import os
 import re
 import sys
 
 import numpy as np
-
-PREFIX = sys.argv[1] if len(sys.argv) > 1 else "output/ab-"
 
 
 def extract_final_ap(log_path):
@@ -38,11 +48,25 @@ def extract_final_ap(log_path):
 
 
 def main():
-    runs = {}   # config_name -> list of (run_name, segm AP, bbox AP, AP50...)
-    for d in sorted(glob.glob(PREFIX + "*")):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("prefix", nargs="?", default="output/ab-",
+                    help="输出目录前缀（默认 output/ab-）")
+    ap.add_argument("--ttest", action="store_true",
+                    help="配对比较输出 scipy 配对 t 检验（t/p 值）")
+    ap.add_argument("--base", default="base",
+                    help="配对比较的参照配置名（默认 base）")
+    args = ap.parse_args()
+
+    runs = {}   # config_name -> list of (run_name, seed, segm, bbox)
+    # 目录名去掉的模式 = 前缀最后一个路径分量（如 "ab-" / "m62_L1b_"）
+    pattern = args.prefix.rstrip("/").split("/")[-1]
+    for d in sorted(glob.glob(args.prefix + "*")):
         if not os.path.isdir(d):
             continue
-        tag = os.path.basename(d)[3:]        # 去掉 "ab-"
+        tag = os.path.basename(d)
+        if not tag.startswith(pattern):
+            continue
+        tag = tag[len(pattern):]
         if tag.startswith("_"):
             continue
         log = os.path.join(d, "log.txt")
@@ -58,7 +82,7 @@ def main():
             (tag, seed, r.get("segm"), r.get("bbox")))
 
     if not runs:
-        print("未找到任何结果（查找前缀 {}）".format(PREFIX))
+        print("未找到任何结果（查找前缀 {}）".format(args.prefix))
         return 1
 
     # ---- 明细 ----
@@ -80,13 +104,11 @@ def main():
     print("%-16s %5s %9s %9s %9s %9s" % (
         "config", "n", "mean", "std", "min", "max"))
     print("-" * 88)
-    agg = {}
     for cfg in sorted(runs):
         aps = [r[2]["AP"] for r in runs[cfg] if r[2]]
         if not aps:
             continue
         a = np.array(aps)
-        agg[cfg] = a
         print("%-16s %5d %9.3f %9.3f %9.3f %9.3f" % (
             cfg, len(a), a.mean(), a.std(ddof=1) if len(a) > 1 else 0.0,
             a.min(), a.max()))
@@ -94,18 +116,26 @@ def main():
     # ---- 配对比较 ----
     print()
     print("=" * 88)
-    print("与 base 的配对比较（相同 seed 的差值）")
+    print("与 {} 的配对比较（相同 seed 的差值）".format(args.base))
     print("=" * 88)
-    if "base" not in runs:
-        print("无 base 组")
+    if args.base not in runs:
+        print("无 {} 组（可用 --base 指定参照组；现有：{}）".format(
+            args.base, ", ".join(sorted(runs))))
         return 0
+
+    if args.ttest:
+        try:
+            from scipy.stats import ttest_rel
+        except ImportError:
+            print("⚠ 未安装 scipy，--ttest 降级为仅差值统计")
+            args.ttest = False
 
     def by_seed(cfg):
         return {r[1]: r[2]["AP"] for r in runs.get(cfg, []) if r[2]}
 
-    base_by = by_seed("base")
+    base_by = by_seed(args.base)
     for cfg in sorted(runs):
-        if cfg == "base":
+        if cfg == args.base:
             continue
         cur = by_seed(cfg)
         pairs = [(s, cur[s], base_by[s]) for s in sorted(
@@ -115,8 +145,14 @@ def main():
         diffs = np.array([c - b for _, c, b in pairs])
         detail = " ".join(
             "s{}:{:+.3f}".format(s, c - b) for s, c, b in pairs)
-        print("%-16s n_pairs=%d  mean_delta=%+.3f  %s" % (
-            cfg, len(pairs), diffs.mean(), detail))
+        line = "%-16s n_pairs=%d  mean_delta=%+.3f  %s" % (
+            cfg, len(pairs), diffs.mean(), detail)
+        if args.ttest and len(pairs) >= 2:
+            t, p = ttest_rel([c for _, c, _ in pairs],
+                             [b for _, _, b in pairs])
+            mark = "  ✅ p<0.05" if p < 0.05 else ""
+            line += "  t={:.3f} p={:.4g}{}".format(t, p, mark)
+        print(line)
     return 0
 
 
