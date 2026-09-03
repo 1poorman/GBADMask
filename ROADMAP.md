@@ -143,8 +143,8 @@ python tools/train_bl+.py --dataset wheat_seg_clean \
 | --- | --- | --- | --- | --- |
 | `r50-protonet` | R50+FPN | ImageNet | 35.37M | 15.36（已有） |
 | `r50-v2` | R50+FPN | ImageNet | 35.70M | 16.68（已有） |
-| `vigv2s-pre` | vigv2-s+BiFPN | MobileViGv2-S | 17.11M | 待跑 |
-| `vigv2m-pre` | vigv2-m+BiFPN | MobileViGv2-M | 25.64M | 待跑 |
+| `vigv2s-pre` | vigv2-s+BiFPN | MobileViGv2-S | 17.11M | **17.21** ✅ |
+| `vigv2m-pre` | vigv2-m+BiFPN | MobileViGv2-M | 25.64M | **17.35** ✅（选中） |
 | `vigv2m-scratch`（可选对照） | vigv2-m+BiFPN | 无 | 25.64M | 待跑 |
 
 配置文件 `configs/run-vigv2.yaml`（新建，M6.1 唯一需要的工程动作）：
@@ -172,6 +172,29 @@ OUTPUT_DIR: "output/vigv2m-pre"
 | 两者都 < 16.4 但 ≥ r50-v2 − 1.0（≥15.7） | 灰区：vigv2-m 进 M6.2 但 R50 支线并行保留 |
 | 两者都 < 15.7 | 回退 R50 平台（原组件路线），cspvigv2 价值存疑，查 0.6 信号找原因 |
 
+### 实测结果（2026-09-03 完成）
+
+| 组 | segm AP（iter 8000） | Δ vs 15.36 | 收敛（2k/4k/6k/8k） | 决策 |
+| --- | --- | --- | --- | --- |
+| `vigv2m-pre` | **17.35** | **+1.99** | 10.77 / 15.07 / 17.55 / 17.35 | ✅ **选中为旗舰骨干** |
+| `vigv2s-pre` | **17.21** | **+1.85** | 10.51 / 14.87 / 16.81 / 17.21 | ✅ 晋级（作轻量对照/备用） |
+
+**结论**：vigv2-m 与 vigv2-s 双双越过 +1.0 门限，m 略优于 s（17.35 > 17.21）。
+旗舰骨干锁定 **vigv2-m**（25.64M，预算余量 27.4M）。
+
+**与 +5 AP 目标的距离**：17.35 → 绝对目标 20.36，尚差 **+3.0 AP**，正落在 M6.2
+组件预期增益区间（Copy-Paste +1~3、PSA +0.5~1.5、EMA +0.3~1.0），蓝图逻辑自洽，
+无需回退 R50 平台。
+
+> **⚠️ 事实修正（2026-09-03 12:30，M6.2 排查发现）**：本表两组实际运行时
+> `run-vigv2.yaml` 漏写 `BASIS_MODULE.NAME: ProtoNetV2`，defaults 默认官方
+> `ProtoNet`（不读 ATTN 键）——即 **17.35/17.21 是 vigv2 + 官方 ProtoNet（无
+> 注意力）的分**，本节"统一 ProtoNetV2+GC basis"的描述与事实不符。判定本身
+> 不受影响（r50 锚点 15.36 同为官方 ProtoNet，骨干对比仍同口径）；但
+> **"vigv2-m + ProtoNetV2 + GC" 旗舰平台从未跑过**，R50 上该效应为 +1.32
+> segm（16.68 vs 15.36），故 M6.2 L1b 批次新增 P0 组补齐该平台基线（锚点），
+> 预期显著高于 17.35。
+
 ### 预计耗时
 
 vigv2-m 算力约为 R50 的 1/3~1/2（MRConv 有 roll 开销），预估 40~70 min/组 ×
@@ -185,8 +208,41 @@ vigv2-m 算力约为 R50 的 1/3~1/2（MRConv 有 roll 开销），预估 40~70 
 > 大小约束在本阶段不构成筛选条件，但仍逐组记录。
 
 **代码就绪状态（2026-09-03）**：A1（Copy-Paste + LSJ）、B1（PSA/C2PSA）、B2（EMA）已实现并通过
-`tests/test_m62_components.py` 单元验证。L1/L2 训练队列**排在 M6.1 之后**——当前
-仅 GPU 1 空闲且正跑 M6.1，待其释放即按 L1 协议挂 A1 / B1 / B2 / C1~C3 单 seed 快检。
+`tests/test_m62_components.py` 单元验证。M6.1 已出分（vigv2-m=17.35 锁定旗舰骨干），
+**L1 参考基线 = P0 组（vigv2m + ProtoNetV2 + gc，本批次锚点）**，按 L1 协议挂
+A1 / B1 / B2 / C1~C3 单 seed 快检。
+
+### M6.2 排查与修订记录（2026-09-03，L1 第一批作废 → L1b 重跑）
+
+**L1 第一批（output/m62_L1_*，作废）暴露的问题**：
+
+| # | 问题 | 证据 | 处置 |
+| --- | --- | --- | --- |
+| 1 | **B1/B2 无效**：ATTN 未生效（config 漏 `NAME: ProtoNetV2`，官方 ProtoNet 不读 ATTN） | 模型 dump 为 `ProtoNet` 无注意力模块；显存/速度/收敛与基线全同 | 17.94/17.99 仅作批次噪声样本 |
+| 2 | **A1 崩溃**：dataset_mapper 漏 `import random` | NameError 于建池后 | 已修 |
+| 3 | **SEED 全程未设**（SEED=-1），违反 L1 协议 | config dump | L1b 显式 `SEED 42` |
+| 4 | C1（NUM_BASES 8）OOM | GPU1 有 6.9GB root 常驻进程，batch 8 峰值超限 | L1b 降 batch 7 |
+| 5 | **批次噪声标定**：三次同配置 17.35/17.94/17.99 → ±0.6 AP，与晋级线 +0.8 同量级 | B1/B2 意外成为噪声样本 | 晋级判定需谨慎 |
+
+**组件代码修复（均已通过单元 + 集成 + GPU 冒烟验证）**：
+
+| 组件 | 修复 | 验证 |
+| --- | --- | --- |
+| PSA | 手写 N² 注意力 → `F.scaled_dot_product_attention`（低层分支 160×160 手写需 ~84GB）；head_dim 零填充到 8 的倍数（SDPA mem-efficient 对齐要求，数学等价） | max\|diff\| ~1e-7；batch 8 峰值 0.4GB |
+| LSJ | 原实现把非方形图拉伸成正方形（wheat 64% 非方形）；改为**等比缩放 + 固定尺寸 crop/pad**（标准 LSJ 语义，兼容混合路径） | 506×800 等比验证 |
+| EMA | `conv_with_kaiming_uniform`（Conv+BN+ReLU）→ 裸卷积（对齐参考实现；BN+ReLU 使 sigmoid 门值 ∈[0.5,1] 只放大不抑制） | 通道守恒 24/128/256 |
+| Copy-Paste | 只读图像写入崩溃（read_image PIL 路径）→ 粘贴前复制；`cp_rng` fork 同源 → per-worker 惰性重播种 | 24 张真实样本 65→143 实例 |
+
+**L1b 协议（tools/run_m62_l1b.sh，2026-09-03 12:17 启动）**：
+
+- 组：**P0（锚点）**→ A1 → B1 → B2 → C2 → C3 → C1（殿后，OOM 风险）
+- `SEED 42` 显式传入；`PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128`
+- **batch 8 → 7，BASE_LR 0.005 → 0.004375（线性缩放）**：GPU1 常驻 6.9GB 外部
+  进程，ProtoNetV2 平台 batch 8 峰值 16.1GB 超出可用 ~16.3GB（两次 OOM 实测，
+  碎片调参无效）；batch 7 峰值 14.15GB，B1/C1 也可容纳。MAX_ITER/STEPS 不变
+  （按 iter 口径与锚点可比）。**M6.3 的 r50-protonet 基线须以同协议（batch 7）
+  重跑，+5 AP 口径才自洽。**
+- 晋级线：Δsegm ≥ +0.8 vs **P0**（本批锚点）
 
 ### 候选池（按优先级）
 
@@ -208,10 +264,13 @@ vigv2-m 算力约为 R50 的 1/3~1/2（MRConv 有 roll 开销），预估 40~70 
 
 ```
 L0 快检（CPU，分钟级）   quick_check 前向/反向 + count_params 记录
+                          + test_m62_components（单元）
+                          + 集成断言（真实 config → build_model → 校验模块类型/注意力存在）
         │
-L1 筛选（seed42 × 8000 iter，wheat）
-        │                晋级线：Δsegm ≥ +0.8 vs 旗舰骨干基线（M6.1 结果）
-        │                每批队列携带同批次基线锚点，排除批次噪声
+L1 筛选（seed42 × 8000 iter，wheat，batch 7）
+        │                晋级线：Δsegm ≥ +0.8 vs 旗舰平台锚点 **P0**（vigv2m+ProtoNetV2+gc，L1b 批次）
+        │                每批队列自带锚点组（P0），排除批次噪声
+        │                （实测同配置跨批次噪声 ±0.6 AP，与 +0.8 晋级线同量级，单 seed 判定从严）
         │
 L2 确认（seeds {42,123,2024}）
         │                晋级线：3 seed 同号 + 配对 t 检验 p<0.05

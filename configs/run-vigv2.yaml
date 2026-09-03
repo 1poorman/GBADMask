@@ -12,6 +12,10 @@
 #     本配置     : cspvigv2-M + BiFPN（repeats=3, 160ch）
 #   其余（basis=ProtoNetV2+gc、数据、增广、评估）全部一致。
 #
+# 注意：BASIS_MODULE.NAME 必须显式写 ProtoNetV2——defaults 默认是官方 ProtoNet
+#   （不读 ATTN 键，注意力配置会静默失效）。M6.1 的历史运行漏了这一行，
+#   导致 ATTN=gc 实际未生效（见 ROADMAP M6.2 修订记录）。
+#
 # 切换变体（命令行覆盖）：
 #   s 变体 : --opts MODEL.VIG.VERSION s MODEL.VIG.PRETRAINED weights/MobileViG_V2_S_Class.pth
 #   从零   : --opts MODEL.VIG.PRETRAINED ""   （USE_C3K2 保持 True 即原始 MobileViGv2 串行）
@@ -36,6 +40,7 @@ MODEL:
     UPSAMPLE: "nearest"
     ATTN: "none"
   BASIS_MODULE:
+    NAME: "ProtoNetV2"
     ATTN: "gc"
     LOSS_ON: False         # 自定义数据集无 thing_train2017/*.npz 语义监督
     NUM_CLASSES: 12        # 与 wheat_seg_clean 的 thing 类别数一致

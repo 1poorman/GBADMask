@@ -72,6 +72,48 @@ assert len(anns) == 1, len(anns)
 assert anns[0]["bbox_mode"] == BoxMode.XYXY_ABS
 # 粘贴位置应有白点
 assert img2.sum() > 0
-print("[OK] apply_copy_paste: added", len(anns), "ann, pasted pixels sum =", int(img2.sum()))
+# 只读输入（detectron2 read_image 的 PIL 路径）不应崩溃
+ro = bg.copy()
+ro.flags.writeable = False
+img3, anns3 = apply_copy_paste(ro, [], pool, prob=1.0, max_donors=2,
+                               rng=__import__("random").Random(0))
+assert img3.flags.writeable and img3.sum() > 0
+print("[OK] apply_copy_paste: added", len(anns), "ann, pasted pixels sum =", int(img2.sum()),
+      "; read-only input OK")
+
+# 6) PSA head_dim 零填充的数学等价（SDPA mem-efficient 要求 hd%8==0）
+for dim, h in [(12, 2), (24, 3), (64, 8)]:
+    torch.manual_seed(0)
+    a = Attention(dim, h)
+    a.eval()
+    x = torch.randn(1, dim, 8, 10)
+    with torch.no_grad():
+        out = a(x)
+        N = 8 * 10
+        t = x.flatten(2).transpose(1, 2)
+        qkv = a.qkv(t).reshape(1, N, 3, h, dim // h).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        att = (q @ k.transpose(-2, -1)) * (dim // h) ** -0.5
+        ref = (att.softmax(-1) @ v).transpose(1, 2).reshape(1, N, dim)
+        ref = a.proj(ref).transpose(1, 2).reshape(1, dim, 8, 10)
+    d = (out - ref).abs().max().item()
+    assert d < 1e-5, (dim, h, d)
+    print(f"[OK] PSA pad-equivalence dim={dim} h={h} hd={dim//h} max|diff|={d:.1e}")
+
+# 7) LSJ 纵横比保持（非方形图，64% 的 wheat 训练图为非方形）
+from adet.data.augmentation import RandomScaleCrop as _RSC
+np.random.seed(0)
+_aug = _RSC(scale_range=(0.5, 1.2), crop_size=(320, 320))
+_t = _aug.get_transform(np.zeros((506, 800, 3), dtype=np.uint8))
+assert _t._new_h / _t._new_w - 506 / 800 < 1e-2, (_t._new_h, _t._new_w)
+_o = _t.apply_image(np.zeros((506, 800, 3), dtype=np.uint8))
+assert _o.shape == (320, 320, 3), _o.shape
+# 大/小缩放两条路径（含混合 crop/pad）
+for lo, hi in [(1.0, 1.5), (0.3, 0.5)]:
+    np.random.seed(1)
+    t2 = _RSC(scale_range=(lo, hi), crop_size=(320, 320)).get_transform(
+        np.zeros((506, 800, 3), dtype=np.uint8))
+    assert t2.apply_image(np.zeros((506, 800, 3), dtype=np.uint8)).shape == (320, 320, 3)
+print("[OK] LSJ aspect preserved (506x800), crop/pad paths OK")
 
 print("ALL SMOKE TESTS PASSED")

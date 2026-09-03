@@ -20,12 +20,8 @@ EMA —— Efficient Multi-Scale Attention（ICASSP 2023，跨空间学习）
 - 可直接挂到 ``basis_module`` 的 ``attn_low`` / ``attn_tower`` 位置：
   ``MODEL.BASIS_MODULE.ATTN = "ema"``（与 gc / psa 同接口）。
 """
-from typing import Optional
-
 import torch
 from torch import nn
-
-from adet.layers import conv_with_kaiming_uniform
 
 
 def _ema_groups(c: int, factor: int) -> int:
@@ -38,12 +34,7 @@ def _ema_groups(c: int, factor: int) -> int:
 
 
 class EMA(nn.Module):
-    def __init__(
-        self,
-        channels: int,
-        factor: int = 32,
-        norm: Optional[str] = "SyncBN",
-    ):
+    def __init__(self, channels: int, factor: int = 32):
         super().__init__()
         self.groups = _ema_groups(channels, factor)
         self.softmax = nn.Softmax(dim=-1)
@@ -52,10 +43,10 @@ class EMA(nn.Module):
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))
         cg = channels // self.groups
         self.gn = nn.GroupNorm(cg, cg)
-        conv = conv_with_kaiming_uniform(norm, True)
-        # 1×1 跨空间卷积 + 3×3 局部分支（按论文结构）
-        self.conv1x1 = conv(cg, cg, 1, 1)
-        self.conv3x3 = conv(cg, cg, 3, 1)
+        # 裸卷积（无 BN/ReLU）——参考实现语义。若加 ReLU，门控 sigmoid 的输入
+        # 非负，门值被限制在 [0.5, 1]，注意力只能放大不能抑制，行为实质改变
+        self.conv1x1 = nn.Conv2d(cg, cg, 1)
+        self.conv3x3 = nn.Conv2d(cg, cg, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.size()

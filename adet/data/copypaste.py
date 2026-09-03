@@ -149,6 +149,10 @@ def apply_copy_paste(
     if rng.random() >= prob or not donor_pool.donors:
         return image, annotations
 
+    # detectron2 read_image 经 PIL 路径可能返回只读数组，粘贴前先复制
+    if not image.flags.writeable:
+        image = image.copy()
+
     h, w = image.shape[:2]
     k = rng.randint(1, max_donors)
     donors = donor_pool.sample(k, rng)

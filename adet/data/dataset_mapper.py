@@ -1,6 +1,7 @@
 import copy
 import logging
 import os.path as osp
+import random
 
 import cv2
 import numpy as np
@@ -103,11 +104,22 @@ class DatasetMapperWithBasis(DatasetMapper):
             )
             self.cp_prob = cfg.INPUT.COPYPASTE.PROB
             self.cp_max = cfg.INPUT.COPYPASTE.MAX_DONORS
-            # 每 worker 用不同 seed，保证各进程粘贴的 donor 不完全相同
-            self.cp_rng = random.Random(hash(ds_name) ^ 0x9E3779B9)
+            # 基础种子在主进程构造时确定；fork 出的 worker 各持同一初始状态，
+            # 首次 __call__ 时按 worker id 重新播种（见 _reseed_cp_rng），
+            # 否则各 worker 的粘贴序列完全相同，损失多样性
+            self._cp_base_seed = (hash(ds_name) ^ 0x9E3779B9) & 0x7FFFFFFF
+            self.cp_rng = random.Random(self._cp_base_seed)
             logging.getLogger(__name__).info(
                 "[CopyPaste] 已启用，donor 池大小 = %d", len(self.donor_pool.donors)
             )
+
+    def _reseed_cp_rng(self):
+        """fork 的 worker 按自身 id 重播种粘贴随机源（每个 worker 仅一次）。"""
+        info = torch.utils.data.get_worker_info()
+        if info is not None and getattr(self, "_cp_worker_id", None) != info.id:
+            self._cp_worker_id = info.id
+            self.cp_rng = random.Random(
+                (self._cp_base_seed * 31 + info.id) & 0x7FFFFFFF)
 
     def __call__(self, dataset_dict):
         """
@@ -149,6 +161,7 @@ class DatasetMapperWithBasis(DatasetMapper):
         # Copy-Paste：在标准增广之前把 donor 实例粘贴进当前图，
         # 这样粘贴进来的实例会一起参与后续的缩放/裁剪/翻转。
         if self.copypaste_enabled:
+            self._reseed_cp_rng()
             image, dataset_dict["annotations"] = apply_copy_paste(
                 image,
                 dataset_dict["annotations"],
@@ -229,7 +242,7 @@ class DatasetMapperWithBasis(DatasetMapper):
             dataset_dict["instances"] = utils.filter_empty_instances(instances)
 
         if self.basis_loss_on and self.is_train:
-            basis_sem_gt = self._load_basis_sem(dataset_dict)
+            basis_sem_gt = self._load_basis_sem(dataset_dict, transforms)
             if basis_sem_gt is None:
                 # 从当前图的实例掩膜在线合成语义标签
                 basis_sem_gt = self._make_basis_sem_from_instances(dataset_dict)
@@ -237,7 +250,7 @@ class DatasetMapperWithBasis(DatasetMapper):
                 dataset_dict["basis_sem"] = basis_sem_gt
         return dataset_dict
 
-    def _load_basis_sem(self, dataset_dict):
+    def _load_basis_sem(self, dataset_dict, transforms):
         """从预生成的 npz 读取 basis 语义标签，不存在时返回 None。"""
         if self.basis_sem_source == "online":
             return None
@@ -259,7 +272,6 @@ class DatasetMapperWithBasis(DatasetMapper):
         basis_sem_gt = np.load(basis_sem_path)["mask"]
         basis_sem_gt = transforms.apply_segmentation(basis_sem_gt)
         return torch.as_tensor(basis_sem_gt.astype("long"))
-
     @staticmethod
     def _make_basis_sem_from_instances(dataset_dict):
         """从 gt_masks 在线合成 basis 语义标签图。
@@ -285,7 +297,9 @@ class DatasetMapperWithBasis(DatasetMapper):
             m = masks.tensor
         elif isinstance(masks, PolygonMasks):
             polys = masks.polygons          # N 个实例，每个是若干段 polygon
-            h, w = dataset_dict["height"], dataset_dict["width"]
+            # 多边形坐标在增广后的图像坐标系里，画布尺寸必须取增广后尺寸
+            # （instances.image_size），而非原图 dataset_dict["height"/"width"]
+            h, w = instances.image_size
             dense = np.zeros((len(polys), h, w), dtype=np.uint8)
             for i, parts in enumerate(polys):
                 for seg in parts:

@@ -14,10 +14,11 @@ PSA (Position-Sensitive Attention) 模块 —— 对应 ROADMAP M6.2 的 B1 组�
 - 外层 wrapper（``PSA``）严格复刻 RT-DETR 的 split-conv-attn-ffn-concat 结构，
   要求 ``c1 == c2``，与项目 ``build_attention(name, channels)`` 的接口一致
   （输入/输出均为 ``(B, C, H, W)`` 且通道不变）。
-- 内层 ``Attention`` 采用**标准缩放点积多头自注意力**（ViT/DETR 同款）。
-  相比 RT-DETR 原版线性注意力，标准 MHA 数值更稳定、实现更易验证，且对
-  basis tower 这类中小分辨率特征图（~80×80）计算量完全可控。语义上它正是
-  "对空间 token 做位置敏感加权"这一 C2PSA 核心思想。
+- 内层 ``Attention`` 采用**标准缩放点积多头自注意力**（ViT/DETR 同款），
+  通过 ``F.scaled_dot_product_attention`` 计算：与手写 softmax(q@k^T*scale)@v
+  数学等价，但显存 O(N)——basis 低层分支作用在 1/4 分辨率（640 输入下
+  160×160，N=25600），手写实现会物化 ~84 GB 的 N² 注意力矩阵，必须用
+  fused kernel。
 - 该模块**不引入额外下采样/上采样**，可直接挂到 ``basis_module`` 的
   ``attn_low`` / ``attn_tower`` 位置（``MODEL.BASIS_MODULE.ATTN = "psa"``）。
 
@@ -33,11 +34,23 @@ from torch.nn import functional as F
 from adet.layers import conv_with_kaiming_uniform
 
 
-def _pick_heads(channels: int, preferred: int = 8) -> int:
-    for h in (preferred, 4, 2, 1):
-        if channels % h == 0:
-            return h
-    return 1
+def _pick_heads(dim: int, preferred: int = 8) -> int:
+    """选头数，使 head_dim 零填充到 8 的倍数后的总算力最小。
+
+    SDPA 的 mem-efficient 后端要求 head_dim 为 8 的倍数（fp32 下否则回退
+    math 后端，物化 N² 注意力矩阵导致 OOM）。dim 较小时（如低层分支
+    c_=12）任何头数都无法整除出 8 的倍数，此时靠 forward 里的零填充兜底，
+    这里就选填充浪费最少的头数。
+    """
+    best, best_eff = 1, None
+    for h in range(1, min(preferred, dim) + 1):
+        if dim % h:
+            continue
+        hd = dim // h
+        eff = h * ((hd + 7) // 8) * 8
+        if best_eff is None or eff < best_eff or (eff == best_eff and h > best):
+            best, best_eff = h, eff
+    return best
 
 
 class Attention(nn.Module):
@@ -48,7 +61,6 @@ class Attention(nn.Module):
         assert dim % num_heads == 0, "num_heads 必须整除 dim"
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
 
@@ -59,12 +71,23 @@ class Attention(nn.Module):
         x = x.flatten(2).transpose(1, 2)
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, nh, N, hd)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # (B, nh, N, hd)
-        attn = (q @ k.transpose(-2, -1)) * self.scale  # (B, nh, N, N)
-        attn = attn.softmax(dim=-1)
-        out = (attn @ v).transpose(1, 2).reshape(B, N, C)  # (B, N, C)
-        out = self.proj(out)                              # (B, N, C)
-        out = out.transpose(1, 2).reshape(B, C, H, W)     # (B, C, H, W)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # (B, nh, N, hd)
+        # head_dim 零填充到 8 的倍数：q/k/v 的填充维为 0，注意力得分不变
+        # （0×0=0），输出填充维恒为 0，切片后与未填充数学等价
+        pad = (-self.head_dim) % 8
+        if pad > 0:
+            q = F.pad(q, (0, pad))
+            k = F.pad(k, (0, pad))
+            v = F.pad(v, (0, pad))
+            # SDPA 内部 scale=1/sqrt(hd_pad)，预缩放 q 使有效 scale 保持
+            # 1/sqrt(hd)（本 torch 版本无 scale 参数）
+            q = q * (self.head_dim + pad) ** 0.5 / self.head_dim ** 0.5
+        out = F.scaled_dot_product_attention(q, k, v)
+        if pad > 0:
+            out = out[..., : self.head_dim]
+        out = out.transpose(1, 2).reshape(B, N, C)     # (B, N, C)
+        out = self.proj(out)                           # (B, N, C)
+        out = out.transpose(1, 2).reshape(B, C, H, W)  # (B, C, H, W)
         return out
 
 
