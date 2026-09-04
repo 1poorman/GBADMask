@@ -66,7 +66,12 @@ class ProtoNetV2(nn.Module):
             feature_channels[self.in_features[0]], low_dim,
             kernel_size=1, stride=1, padding=0, bias=False)
 
-        self.attn_low = build_attention(attn, low_dim)
+        # 注意力插入点选择：ATTN 作用于 tower；ATTN_LOW 决定低层分支
+        # （默认跟随 ATTN。"none" = 低层不加注意力，"gc" 可在重组件
+        # （如 PSA）超出显存预算时只保留 tower 侧，与 P0 锚点保持可比）
+        self.attn_low = build_attention(cfg.MODEL.BASIS_MODULE.ATTN_LOW
+                                        if cfg.MODEL.BASIS_MODULE.ATTN_LOW != "auto"
+                                        else attn, low_dim)
         self.attn_tower = build_attention(attn, planes)
 
         # 语义损失：可用 advanced_losses 里对前景更友好的版本。

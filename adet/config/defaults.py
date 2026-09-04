@@ -230,6 +230,9 @@ _C.MODEL.BASIS_MODULE.SEM_LOSS = "fdc"
 _C.MODEL.BASIS_MODULE.SEM_DETACH = True
 # ProtoNetV2 中低层细节分支的通道数（拼接回主干前会被降维）
 _C.MODEL.BASIS_MODULE.LOW_LEVEL_DIM = 24
+# 低层分支注意力类型："auto" 跟随 ATTN；也可单独指定（如 "none"/"gc"）。
+# 用途：ATTN=psa 等重组件超出显存预算时，ATTN_LOW=none 只保留 tower 侧
+_C.MODEL.BASIS_MODULE.ATTN_LOW = "auto"
 _C.MODEL.BASIS_MODULE.NUM_BASES = 4
 _C.MODEL.BASIS_MODULE.LOSS_ON = False
 _C.MODEL.BASIS_MODULE.ANN_SET = "coco"
