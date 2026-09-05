@@ -6,9 +6,10 @@
 set -u
 cd /home/huachenghao/codes/GBADMask
 while true; do
-  # 收尾队列写 M62_FINAL_QUEUE_DONE，且 B1 必须有 END 记录才算真结束
+  # 收尾队列写 M62_FINAL_QUEUE_DONE，且 B1 必须成功退出才算真结束。
+  # 日志会追加历史作废批次，不能只匹配 "END B1 exit"。
   if grep -q "M62_FINAL_QUEUE_DONE" logs/m62_fu.log 2>/dev/null \
-     && grep -q "END B1 exit" logs/m62_L1c_B1.log 2>/dev/null; then
+     && grep -q "END B1 exit=0" logs/m62_L1c_B1.log 2>/dev/null; then
     break
   fi
   sleep 300

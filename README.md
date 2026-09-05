@@ -4,9 +4,29 @@
 
 # GBADMask
 
-GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMask** 实现基础上做的二次开发，目标场景是**植株 / 草莓器官的实例分割**。
+GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMask** 实现基础上做的二次开发，研究场景是**小数据农作物病害实例分割**。
 
-核心思路：把 BlendMask 的 bottom-up 基（bases）生成模块与 BiFPN 结合，并引入 **视觉图卷积骨干（Vision GNN / MobileViG）** 与 **全局上下文注意力（GCNet）**、**Focal-Dice-CE 混合损失**，以在保持单阶段实例分割速度的同时提升密集小目标的掩膜质量。
+项目针对农业病害数据集规模小、类别与尺度不均衡、通用大模型训练和终端部署成本高的问题，
+从 BlendMask 的 **backbone、neck、FCOS 检测头和 basis/mask 分支**进行可归因的轻量化改造。
+当前主线使用带 ImageNet 预训练的 **MobileViGv2-S/M + C3K2**，在低于 R50 的模型规模下
+研究图卷积、多尺度融合和掩膜细节建模；目标不是堆叠 Transformer 类大模型，而是在低算力
+终端上取得更好的精度-参数量-速度平衡。
+
+### 研究目标与比较口径
+
+- **论文主模型**：优先从 MobileViGv2-S/M 中选择，完整模型参数量不超过官方
+  BlendMask-R50，并报告 segm AP、参数量、FLOPs、峰值显存、延迟和 FPS。
+- **性能目标**：在同数据、同训练日程、同随机种子下稳定优于官方 BlendMask-R50；绝对
+  `+5 AP` 是项目冲刺目标，不以无条件扩大模型为代价。
+- **统计要求**：最终结论采用 seeds `{42,123,2024}`，要求增益方向一致并进行配对 t 检验。
+- **公平归因**：backbone、neck、FCOS 和 mask 分支分别做单变量消融，避免把模型容量、
+  预训练或检测头收益全部归因于骨干。
+- **容量上限组**：MobileViGv2-B 只用于观察更大容量的性能上限，不作为轻量架构优于
+  ResNet50 的核心证据，也不自动成为最终部署模型。
+
+当前统一 wheat 协议下，完整 `MobileViGv2-M + C3K2 + BiFPN + ProtoNetV2` 约 25.97M
+参数，官方 BlendMask-R50 为 35.37M；当前干净数据集单 seed segm AP 为 16.93 vs 15.00。该结果说明
+轻量路线有潜力，但正式论文结论仍需多 seed、跨数据集及效率指标确认。
 
 > **上游**：AdelaiDet v0.2.0（BlendMask）+ Detectron2 v0.6
 > **主要改动目录**：`adet/modeling/blendmask/`、`adet/modeling/backbone/`
@@ -33,9 +53,10 @@ GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMa
 ```
 adet/modeling/
 ├── backbone/
-│   ├── cspvig.py            ★ 新增  Vision GNN（MobileViG）图卷积骨干
+│   ├── cspvig.py            ★ 新增  Vision GNN（MobileViG）图卷积骨干（旧版对照）
+│   ├── cspvigv2.py          ★ 新增  MobileViGv2 + C3K2（S/M 轻量主线，B 容量上限）
 │   ├── Lcspvig.py           ★ 新增  cspvig 变体 + LSKblock 大核选择注意力
-│   ├── bifpn.py             ▲ 修改  新增 cspvig / Lcspvig 两个 BiFPN builder
+│   ├── bifpn.py             ▲ 修改  接入 ViG/ViGv2 的 BiFPN（保持 p3~p7 接口）
 │   ├── __init__.py          ▲ 修改  导出新增的 BiFPN builder
 │   └── fpn.py dla.py vovnet.py mobilenet.py resnet_lpf.py resnet_interval.py lpf.py   （官方原样）
 └── blendmask/
@@ -58,8 +79,11 @@ adet/modeling/
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MODEL.VIG.USE_LSK` | `True` | 是否在 Lcspvig 的 transition 层启用 LSK |
+| `MODEL.VIG.VERSION` | `s` | MobileViGv2 变体：`ti`/`s`/`m`/`b`；S/M 为轻量主线，B 为容量上限 |
+| `MODEL.VIG.PRETRAINED` | `""` | MobileViGv2 ImageNet 分类预训练权重 |
 | `MODEL.BASIS_MODULE.ATTN` | `"gc"` | basis 内部注意力类型：`none`/`gc`/`cbam`/`ca` |
 | `MODEL.BASIS_MODULE.LOW_LEVEL_DIM` | `24` | `ProtoNetV2` 低层细节分支通道数 |
+| `MODEL.FCOS.BOX_QUALITY` | `"ctrness"` | FCOS 质量分支：`ctrness` 或 `iou` |
 
 ---
 
@@ -118,8 +142,10 @@ def build_fcos_cspvig_bifpn_backbone(cfg, input_shape): ...   # MobileViG + BiFP
 def build_fcos_Lcspvig_bifpn_backbone(cfg, input_shape): ...  # Lcspvig + BiFPN
 ```
 
-BiFPN 部分（`SingleBiFPN` / `BiFPN` / `BackboneWithTopLevels`）沿用官方实现，未改动：
-可学习的 fast-normalized 融合权重 + `swish` 激活 + 深度可分离 3×3，重复 `MODEL.BiFPN.NUM_REPEATS` 次。
+BiFPN 部分（`SingleBiFPN` / `BiFPN` / `BackboneWithTopLevels`）保留 BlendMask 所需的
+多尺度接口，并支持 ViGv2 的不同输入通道：可学习的 fast-normalized 融合权重 + `swish`
+激活 + 3×3 卷积，重复 `MODEL.BiFPN.NUM_REPEATS` 次。后续轻量 PAFPN/GELAN-like neck
+必须保持相同的 `p3~p7`、通道和 stride 接口，才能进行可归因比较。
 
 ---
 
@@ -359,13 +385,14 @@ cudnn.benchmark 修复只能消除其中一部分）。
 
 ## 4. 配置说明
 
-`configs/` 下 6 个文件，均为 AdelaiDet 的 yacs 配置（`_BASE_` 继承）：
+`configs/` 下的配置均为 AdelaiDet 的 yacs 配置（`_BASE_` 继承）：
 
 ```
 configs/
 ├── Base-BlendMask.yaml            ResNet + FPN，官方基线（COCO）
 ├── Base-BlendMask-BiFPN.yaml      ResNet + BiFPN，官方基线（COCO，本项目 run-*.yaml 的公共父配置）
-├── run-BlendMask+.yaml            ★ 官方 basis + MobileViG + BiFPN
+├── run-BlendMask+.yaml            ★ 官方 basis + 旧版 MobileViG + BiFPN（历史对照）
+├── run-vigv2.yaml                 ★ MobileViGv2-S/M + C3K2 + BiFPN（当前主线）
 ├── run-vig.yaml                   ★ 官方 basis + MobileViG + BiFPN（Plantv2，基线）
 ├── run-BlendMask2-vig.yaml        ★ 改进 basis + MobileViG + BiFPN
 └── run-SCBlendMask-plus.yaml      ★ 改进 basis + Lcspvig(含 LSK) + BiFPN
@@ -813,6 +840,30 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-wheat-seg.
 ---
 
 ## 9. 优化建议
+
+### 当前论文研发路线
+
+后续候选不再以“增加更多注意力模块”为主，而按以下正交路线筛选：
+
+| 路线 | 候选 | 定位 |
+| --- | --- | --- |
+| Backbone | MobileViGv2-S/M + C3K2 | 论文主线，证明参数效率与部署价值 |
+| Backbone 上限 | MobileViGv2-B | 容量上限探索，不用于单独证明架构优势 |
+| Neck | 当前 BiFPN；轻量 PAFPN/GELAN-like 对照 | 保持 `p3~p7` 与 FCOS/BlendMask 接口，先在 M 上单变量比较 |
+| FCOS | `BOX_QUALITY=iou`；必要时 `moving_fg` | 低风险质量建模，不同时改 head 结构 |
+| Mask | BCE + 小权重 Dice；`BOTTOM_RESOLUTION=64` | 关注小病斑与边界，记录 AP75、显存和速度 |
+| Schedule | 提前衰减、延长训练、cosine | 零参数成本，优先于结构扩张 |
+| Inference | 448/512/640 单尺度与有限 TTA | 单独报告 FPS，不用慢速 TTA 替代部署结果 |
+
+GELAN 不是当前代码中可直接替换的现成 neck。若实现，只借鉴多路径梯度流与 concat 聚合，
+输出必须继续满足 `p3~p7`、统一通道和 stride `[8,16,32,64,128]`。首轮不得同时组合
+MobileViGv2-B、GELAN-like neck 和改进 FCOS，否则无法判断收益来源。
+
+论文结果建议分为三张表：
+
+1. R50 与 MobileViGv2-S/M 的精度-效率主比较；
+2. 固定 MobileViGv2-M 的 backbone/neck/FCOS/mask 单变量消融；
+3. MobileViGv2-B 的容量扩展结果。
 
 ### 已完成
 

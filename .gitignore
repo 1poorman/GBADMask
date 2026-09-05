@@ -29,6 +29,7 @@ dist/
 
 # pytorch/python/numpy formats
 *.pth
+*.pt
 *.pkl
 *.npy
 
