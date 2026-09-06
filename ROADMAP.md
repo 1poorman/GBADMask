@@ -1,6 +1,6 @@
 # GBADMask 研发蓝图（ROADMAP）
 
-> 版本：v3.2（2026-09-04 修订：明确论文主线与轻量化比较口径）
+> 版本：v3.3（2026-09-06 修订：新增 M6.5 深度改造组件池与实验漏斗）
 > 总目标：面向小数据农作物病害实例分割，改造 BlendMask 的 backbone、neck 与实例
 > 分割相关模块，在低算力终端可部署的模型规模内取得稳定的高质量 mask 预测。
 > **+5 AP 是项目冲刺验收线，不是以牺牲轻量化为代价的唯一目标。**
@@ -520,6 +520,171 @@ batch6 15.7GB，均超 GPU1 可用 ~16.4GB）→ 该线暂停。
 | Strawberry（旗舰 3 + 基线 3） | 6 | ~2~3 h | ~15 h |
 | Plantv2（旗舰 3 + 基线 3，50ep） | 6 | ~5~7 h | ~36 h |
 | **合计** | 17 | | **~55 GPU 时 ≈ 2.3 天**（双卡可减半） |
+
+---
+
+## M6.5 深度改造组件池与实验漏斗
+
+> **启动条件**：M6.3 已确认平台在 Strawberry 全日程下仅领先 R50 **+1.73 AP**，
+> 当前组件池（GC/EMA/PSA、Copy-Paste/LSJ、C3K2、训练日程）已出清，继续添加同类
+> attention 或普通增强无法填补 `P0_full=65.42` 到 `+5` 线 `68.69` 的 **+3.27 AP**。
+> M6.5 不再以“再加一个模块”为主，而是改造 FCOS 的质量建模、正样本分配、BlendMask
+> 的 mask 解码和训练闭环。所有增益均为待验证假设，不能把论文报告值直接换算为本项目 AP。
+
+### M6.5.1 当前瓶颈判断
+
+现有代码和 M6.3 诊断支持以下排序，后续实验须用分组指标验证而不是只看总 AP：
+
+1. **小目标像素密度不足**：Strawberry 多尺度 eval 中 `512` 的 APs 相对 `416` 大幅上升，
+   但整体 AP 略降；说明目标细节在低分辨率路径中损失。
+2. **mask 边界和解码能力不足**：当前 `ProtoNetV2` 输出 `NUM_BASES=4`，`Blender` 使用
+   `56x56` ROI 和一次线性 basis 混合，缺少边界残差和不确定区域修正。
+3. **分类、box quality、mask quality 不一致**：FCOS 当前为 sigmoid focal + scalar box
+   regression + 独立 centerness，推理分数没有直接利用真实 mask IoU。
+4. **正样本分配过于几何化**：当前按 center sampling、FPN size range 和最小面积 GT 选点，
+   没有使用分类/定位联合质量，可能错失小目标最优位置。
+5. **长尾类别风险**：TAL、teacher 和质量损失都可能偏向头部类别，必须报告每类 positive
+   数量、tail recall 和 small AP，不能只依据总体 AP 晋级。
+
+### M6.5.2 新组件池
+
+| ID | 组件/来源 | 改造点 | 主要假设 | 预期贡献（仅假设） | 风险 |
+| --- | --- | --- | --- | --- | --- |
+| DQ1 | **QFL**，GFL [paper](https://arxiv.org/abs/2006.04388)，[code](https://github.com/implus/GFocal) | FCOS 分类目标改为连续 IoU quality | 分类分数同时表达类别和 box 质量 | segm +0.3~1.0 | 中 |
+| DQ2 | **DFL**，GFL | 4 个 scalar distances 改为离散边界分布 | 小目标边界存在不确定性，分布回归优于 scalar | segm +0.3~1.2 | 中 |
+| DQ3 | **QFL/DFL quality score** | ablate centerness，统一训练/推理分数 | 避免 cls×centerness 重复惩罚小目标 | segm +0.2~0.8 | 中 |
+| AS1 | **FCOS-TAL**，TOOD [paper](https://arxiv.org/abs/2108.07755)，[code](https://github.com/fcjian/TOOD) | 几何候选内动态 top-k assignment | 分类和定位联合选点比固定中心更优 | segm +0.5~1.5 | 中高 |
+| MQ1 | **Mask quality head** | FCOS location 预测 detached mask IoU | proposal 排序应使用 mask quality | segm +0.5~1.5 | 中 |
+| HQ1 | **HQ-SAM detail path** [paper](https://arxiv.org/abs/2306.01567)，[code](https://github.com/SysCV/SAM-HQ) | mask 分支接入 res2/res3 高分辨率细节并门控融合 | bypass 下采样可恢复 small/boundary 细节 | segm +0.5~1.5 | 中 |
+| BR1 | **QuBER-style boundary error** | TP/TN/FP/FN boundary auxiliary + residual | 显式区分边界侵蚀与膨胀错误 | segm +0.5~1.5 | 中 |
+| BR2 | **Mask Transfiner uncertainty refinement** [paper](https://arxiv.org/abs/2111.13616)，[code](https://github.com/amazon-science/MaskTransfiner) | 仅对高熵 boundary patches 做局部修正 | 不必全局提高 mask 分辨率即可改善边界 | segm +0.5~1.5 | 中高 |
+| NK1 | **PAFPN/GELAN-like**，参考 [Ultralytics](https://github.com/ultralytics/ultralytics) / [YOLOv9](https://github.com/WongKinYiu/YOLOv9) | BiFPN 的显式 top-down/bottom-up concat 对照 | 多路径可保留 P3 细节和梯度 | segm +0.3~1.2 | 中 |
+| NK2 | **ASFF-P3**，[code](https://github.com/GOATmessi8/ASFF) | P3/P4/P5 空间自适应尺度融合 | 目标区域应按位置选择尺度 | segm +0.3~1.0 | 中 |
+| KD1 | **Localization Distillation** [paper](https://arxiv.org/abs/2102.12252)，[code](https://github.com/HikariTJU/LD) | teacher valuable-region box/quality distillation | 大模型定位分布可迁移给 M 平台 | segm +0.5~1.5 | 高 |
+| KD2 | **mask/boundary distillation** | teacher mask logits 和 boundary disagreement 蒸馏 | teacher 可提供高质量边界软目标 | segm +0.5~2.0 | 高 |
+| SSL1 | **Soft Teacher**，[paper](https://openaccess.thecvf.com/content/ICCV2021/html/Xu_End-to-End_Semi-Supervised_Object_Detection_With_Soft_Teacher_ICCV_2021_paper.html)，[code](https://github.com/microsoft/SoftTeacher) | weak/strong augmentation + class-aware pseudo masks | 同域无标注数据可补充 tail/small instances | segm +1~3 | 很高，需无标注数据 |
+
+**首轮排除**：完整 Mask2Former/MaskDINO query detector、完整 DiffusionInst/SegRefiner、
+NAS-FPN 搜索、完整 HRFPN、RepViT/EMO backbone 替换。它们会同时改变任务范式或计算约束；
+仅借鉴其 pixel decoder、detail path 或 refinement 思想。
+
+### M6.5.3 推荐总装版本
+
+#### V1：质量感知 FCOS
+
+```text
+MobileViGv2-M + C3K2 + BiFPN-GC
+    -> FCOS-QFL/DFL
+    -> ProtoNetV2
+```
+
+```text
+V1-a: QFL only
+V1-b: DFL only
+V1-c: QFL + DFL + centerness
+V1-d: QFL + DFL - centerness
+```
+
+必须同步修改 `fcos.py`、`fcos_outputs.py`、回归解码、proposal score 和 checkpoint shape；
+不能只替换 loss。首选候选是 `V1-d`，但以 AP、tail 和 small diagnostics 决定。
+
+#### V2：任务对齐和高质量 mask
+
+```text
+V1 winner
+    -> FCOS-TAL（保留 center sampling/FPN range）
+    -> res2/res3 gated detail branch
+    -> boundary auxiliary/residual
+    -> mask quality head
+```
+
+TAL 首版约束：前 `500~1000` iter 使用原始 assignment；候选点仍受 box、center 和 FPN
+range 限制；每个 GT 至少保留一个正点；small/tiny 目标使用独立 dynamic-k。必须监测每类
+正样本数，防止动态分配淘汰尾类。
+
+#### V3：教师蒸馏旗舰
+
+```text
+teacher: larger or longer-trained model
+student: V2 light model
+distill: valuable localization + box quality + mask logits + boundary
+```
+
+优先做 supervised distillation；只有存在大量同域无标注图像时才进入 Soft Teacher。蒸馏区域
+按 teacher quality 加权，tail class 使用受上限约束的 frequency-aware weight，禁止对全背景
+做均匀 feature imitation。
+
+### M6.5.4 实验漏斗和验收指标
+
+#### Wave 0：诊断基线
+
+在不改变模型的情况下增加：
+
+| 诊断 | 内容 |
+| --- | --- |
+| quality calibration | classification score 与 box IoU、mask IoU 的相关性/可靠性曲线 |
+| assignment | 每类和每尺寸组的 positive 数、assigned IoU、每 GT 是否有正点 |
+| mask error | boundary FP/FN 面积、mask entropy、AP50/AP75/APs/APm |
+| long-tail | head/medium/tail 的 AP、recall、confidence 和 false positives |
+| efficiency | 参数、FLOPs、峰值显存、s/iter、batch=1 latency |
+
+#### Wave 1~6：单变量与组合
+
+```text
+Wave 1: DQ1/DQ2/DQ3（quality regression/classification）
+Wave 2: AS1（TAL，保留 FCOS 几何候选约束）
+Wave 3: HQ1 -> BR1 -> BR2（逐步改 mask decoder）
+Wave 4: MQ1（mask-aware score calibration）
+Wave 5: NK1/NK2（仅在诊断支持时测试）
+Wave 6: KD1 -> KD2；SSL1 仅在有同域无标注数据时测试
+```
+
+每波只允许一个主变量；组合需达到单变量增益之和的至少 `50%`，否则淘汰。单 seed 仅作
+筛选；确认阶段需 seeds `{42,123,2024}`、三 seed 同号、配对 t 检验 `p<0.05`。任何总 AP
+上升但 tail recall 下降超过 `2 AP` 的版本不得晋级。
+
+### M6.5.5 工程边界与实现纪律
+
+1. 保持 `FCOS -> proposals -> Blender` 主数据流可回退；每个新分支必须有 config 开关，
+   默认配置仍是当前 P0。
+2. `mask quality` target 必须由 detached coarse mask IoU 生成；推理分数先比较
+   `cls×mask_quality` 与 `cls×sqrt(box_quality×mask_quality)`，不得未经消融三者相乘。
+3. 高分辨率 detail branch 只给 mask 分支使用，优先接 `res2`，不因 mask 改造同时扩大
+   FCOS 输入和全局 `BOTTOM_RESOLUTION`。
+4. DFL 需统一 `reg_max`、target 归一化、expected-distance 解码和 NMS 前分数；QFL、
+   Varifocal、centerness 不得未经消融同时使用。
+5. TAL 必须提供 assignment 统计；不能只依赖最终 AP 判断是否改善。
+6. 所有动态模块在 `__init__` 完成参数注册；禁止首次 forward 惰性创建可训练参数后才
+   加入 optimizer。
+7. 队列运行期间禁止修改 `adet/`；先完成 L0/单元/集成测试，再启动 GPU 训练。
+
+### M6.5.6 成功路径与回退判定
+
+最现实的高增益路径是：
+
+```text
+V1 quality-aware FCOS
+    + V2 TAL
+    + HQ detail/boundary mask
+    + supervised localization/mask distillation
+```
+
+规划区间仅用于资源估算：`V1 +0.8~1.8`，`V2 +1.5~3.0`，`V3 +2.0~4.0`；不能将各组件
+区间简单相加。若 V2 在 Strawberry 三 seed 下稳定优于 R50 但仍未达 +5，则按 M6.3 Pareto
+规则保留轻量主模型；若 TAL 或质量损失损害尾类，回退到 V1 并只保留高分辨率 mask 路径。
+
+### M6.5.7 参考论文和代码
+
+| 方向 | 论文 | 代码 |
+| --- | --- | --- |
+| Quality/distribution regression | [GFL](https://arxiv.org/abs/2006.04388) | [GFocal](https://github.com/implus/GFocal) |
+| Task alignment | [TOOD](https://arxiv.org/abs/2108.07755) | [TOOD](https://github.com/fcjian/TOOD) |
+| High-quality mask detail | [HQ-SAM](https://arxiv.org/abs/2306.01567) | [SAM-HQ](https://github.com/SysCV/SAM-HQ) |
+| Uncertainty refinement | [Mask Transfiner](https://arxiv.org/abs/2111.13616) | [MaskTransfiner](https://github.com/amazon-science/MaskTransfiner) |
+| Localization distillation | [LD](https://arxiv.org/abs/2102.12252) | [LD](https://github.com/HikariTJU/LD) |
+| Multi-scale neck | [YOLOv9/GELAN](https://github.com/WongKinYiu/YOLOv9) | [Ultralytics](https://github.com/ultralytics/ultralytics) |
+| Spatial scale fusion | [ASFF](https://github.com/GOATmessi8/ASFF) | ASFF official repository |
+| Semi-supervised detection | [Soft Teacher](https://openaccess.thecvf.com/content/ICCV2021/html/Xu_End-to-End_Semi-Supervised_Object_Detection_With_Soft_Teacher_ICCV2021_paper.html) | [SoftTeacher](https://github.com/microsoft/SoftTeacher) |
 
 ---
 

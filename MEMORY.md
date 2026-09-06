@@ -1,6 +1,6 @@
 # GBADMask 工作记忆（MEMORY.md）
 
-> 最后更新：2026-09-05
+> 最后更新：2026-09-06
 > 用途：会话交接。新会话请先读本文件，再读 ROADMAP.md 的 M6.2/M6.3 章节。
 
 ---
@@ -124,14 +124,23 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
 
 ## 3. 运行中 / 历史记录
 
-**（当前）无 GPU 任务。strat_Bcap 降档 batch6 仍 OOM（15.7GB/16.4GB，B 在 wheat
-512-640 输入的激活占用几乎不随 batch 降）→ MobileViGv2-B 在 wheat 协议上跑不动，
-暂停等用户定夺（见 §6 校准决策，B 是否转 strawberry 原生低分辨率或放弃）**：
+**（当前）GPU1 空闲。Strawberry M 平台廉价杠杆攻坚（wave1+wave2）2026-09-06 06:13 全队
+收队，结论为**负/无效**：P0_full=65.42 即 M@416 协议的平台值；cosine / CP / 30k 延训
+全部 ≤0，**无廉价开关可达 +5 线 68.69（差 +3.27）**。口径：+5 绑 Strawberry
+（R1_full 63.69 → 线 68.69），先推 M、不加输入分辨率，B 殿后。→ 坐实 ROADMAP M6.5
+前提：只能深度改造（QFL/DFL、TAL、mask quality、HQ detail/boundary、蒸馏）或上 B。
+M6.5 归属与实现待用户定（注意：ROADMAP/MEMORY 有并行会话在改，勿重复改 adet）。
 ```
-背景：M6.3b 主队列已于 04:09 收队——
-  strawberry_R1_full ✅ 63.69 segm（r50, 22k≈100ep）
-  strawberry_P0_full ✅ 65.42 segm（vigv2m, +1.73）
-  strat_Bcap batch7 ❌ OOM（16.2GB）→ batch6 ❌ OOM（15.7GB）
+wave1 出结：
+  p0_cos 64.10（−1.32，cosine 在莓上伤、wheat +0.5 不复现）→ 剔除
+  p0_iou / p0_cos_iou exit=1（BOX_QUALITY=iou 分支需 gt_ctrs 但 dataloader 未挂，
+    属 adet 未接通项）→ 弃用
+wave2 出结：
+  p0_cp 64.16（−1.26；轨迹 47.97/57.66/59.90/64.12/64.06/64.16，CP 在草莓也伤）→ 剔除
+  p0_ext30 64.92（−0.50；30k→137ep 反降，延长训练无益）→ 剔除
+多尺度 eval 诊断（m63c_evalsweep，09-05 15:19）：416 是 R1/P0 各自最优；512 使 APs
+  暴增（P0 39.62→50.08、R1 43.60→48.39，P0 反超）但整体略降 → 小目标差是像素密度
+  问题；640 大跌。不加分辨率前提下需训练侧补 small。
 ```
 
 ```
