@@ -1,7 +1,7 @@
 # GBADMask 工作记忆（MEMORY.md）
 
-> 最后更新：2026-09-06
-> 用途：会话交接。新会话请先读本文件，再读 ROADMAP.md 的 M6.2/M6.3 章节。
+> 最后更新：2026-09-08
+> 用途：会话交接。新会话请先读本文件，再读 ROADMAP.md 的 M6.2/M6.3/M6.5 章节。
 
 ---
 
@@ -124,7 +124,123 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
 
 ## 3. 运行中 / 历史记录
 
-**（当前）GPU1 空闲。Strawberry 分辨率重议（M6.3e）全队收队 12:17：
+**（当前）GPU1 空闲。M6.5 DQ1/QFL 实验作废（2026-09-06 14:35 UTC 复盘更正）：
+
+- **双重协议错误**：①脚本误用 `configs/run-strawberry.yaml`——其
+  `BACKBONE.NAME=build_fcos_cspvig_bifpn_backbone` 是 **cspvig v1**（模型 dump
+  显示 `(backbone): MobileViG(`），而 P0_res 用 `run-vigv2.yaml` 的 cspvigv2；
+  ②**cspvig v1 的 build 完全忽略 MODEL.VIG.PRETRAINED**（cspvig.py:436 无加载
+  逻辑）→ DQ1 实际 = cspvig v1 随机初始化 + QFL，56.03@416 vs P0_full 65.42
+  的 −9.4 与"无预训练损失 ~11AP"（wheat S1 实测）量级吻合；
+- **判定更正：QFL 未被检验，DQ1 结果作废**（既不淘汰也不晋级 QFL）；
+  教训入运维纪律：**写 run 脚本必须核对 config 的 BACKBONE.NAME 与加载逻辑**，
+  `run-strawberry.yaml` 是 v1 时代的旧配置（勿再用于 vigv2 平台实验，
+  应像 wave1/2 一样用 run-vigv2.yaml + DATASETS.NAME Strawberry 覆盖）；
+- **HQ1（res2 detail branch）已出终局：淘汰**（16:29 UTC exit=0，
+  `output/m65_hq1_detail_straw512`）：segm **65.43**（bbox 65.87）vs P0_res
+  66.06（67.49）→ **Δ −0.63 / bbox −1.62**；APs 40.63 vs 42.09（−1.46）、
+  APm −0.26、APl −1.17；逐类 Anthracnose −1.9 / PMF −2.3 / ALS +1.1。
+  轨迹 54.51/62.23/63.66/65.44/65.37/65.43（16k 后平台）。
+  **架构层根因：tower 输出 fre 本就是 stride 4 = 骨干最高分辨率**（Blender
+  POOLER_SCALES=0.25 也按 stride 4 采样），detail 分支只加了"内容"没加
+  "分辨率"，且 res2 是未语义调制的浅层噪声 → **HQ 线整线关闭（D2 门控不做，
+  上限被封死）**。代码保留（默认关闭、旧 checkpoint 兼容、有单测）。
+- **（当前）M6.5 wave1b 全队收队（09-07 05:19 UTC，两组 exit=0）**：
+  - **DQ1b（QFL 正确协议）：淘汰**。segm **65.23** / bbox 67.07 vs P0_res
+    66.06/67.49 → **−0.83/−0.42**；AP75 −1.49、APs −1.63（轨迹
+    54.47/60.86/64.05/65.38/65.20/65.23）。QFL 在正确协议下方向仍负 →
+    **V1 质量线（QFL）关闭**，DFL 同线且手术更大，降级不做。
+  - **M2b（BOTTOM_RESOLUTION 56→64）：方向性信号，单 seed 未确认**。
+    segm 65.15 / bbox 66.43 → 总分 −0.91/−1.06，但 **APs 47.46 vs 42.09
+    = +5.37（M6.5 首个真实瓶颈级信号）**；APm −1.61 / APl −1.89（轨迹
+    55.23/62.77/64.37/64.90/65.25/65.15）。
+  - **关键诊断（05:31）**：P0_res checkpoint 以 BOTTOM_RES=64 **eval-only**
+    = 66.02（APs 42.09 不变）→ **推理端分辨率零效果，M2b 的 APs 增益全部
+    来自训练目标分辨率**（小实例 64×64 目标更细 → BCE 学到更细边界）；
+    bbox −1.06 说明部分跌幅是共享特征训练扰动/seed 噪声，非 mask 头本身。
+    判读：APs +5.4 远超分桶噪声 → 信号真实；总分跌幅需 seed 复验，
+    BOTTOM_RES=64 暂不改默认。
+- **下一步（wave1c 队列 `tools/run_m65_wave1c.sh`）**：① **BR1-lite**
+    （边界加权 mask BCE：GT 形态学边界带内 BCE 权重 ×(1+λ)，零参数、
+    直击 AP75/边界——正是 M2b 中 APm/APl 的痛点；λ=3 单变量 @56）→
+    ② **M2b-s123**（BOTTOM_RES 64 seed123，复验 APs 信号量级）。
+- **wave1c 全队收队（09-07 09:32 UTC，两组 exit=0）**：
+  - **BR1-lite（λ=3）：淘汰**。segm 65.50 / bbox 66.60 → −0.56/−0.89；
+    **AP75 70.70 vs 73.81 = −3.11 反向**，APs −6.32（35.77）。逐类 ALS −1.9。
+    判读：边界带过加权挤占主体 BCE 信号（loss_mask 终值 0.166 vs 基线
+    ~0.078，λ=3 相当于边界像素 4× 权重，56×56 下边界带占比过高）→
+    **损失重加权路径整线关闭**（BR2/MaskTransfiner 亦依赖同类信号，
+    降级不做）；代码保留（`BOUNDARY_LOSS_WEIGHT=0.0` 默认关，有单测）。
+  - **M2b-s123：信号复现且总分转正**。segm **66.14**（bbox 67.05）vs
+    P0_res(s42) 66.06 → +0.08；**APs 49.37 / AP75 74.04**（s42 版为
+    47.46/72.23）。APs 两 seed 轨迹高度一致（末段 47.5/48.9/49.4）→
+    **BOTTOM_RES=64 的 APs 增益坚实（+5~7），且 seed123 无总分损失**
+    （s42 的 −0.91 疑为该 seed 特有扰动）。
+- **（当前）wave1d 运行中**（10:18 UTC 启动，`tools/run_m65_wave1d.sh`）：
+  ① **P0_res-s123 已完成**（12:15 UTC）：segm **65.77**（bbox 66.76，
+    APs 49.57/AP75 72.86）→ **seed123 配对判定（反转）**：M2b-s123 66.14
+    vs P0_res-s123 65.77 → **Δ +0.38/AP75 +1.18，但 APs −0.20**——
+    **seed123 的高 APs（49.57）是基线特性而非 M2b 贡献**。
+    两个 seed 的真实图景：Δ APs = s42 **+5.37** / s123 **−0.20**（seed
+    强依赖，P0_res APs 基线本身在 42.09~49.57 间波动 ~7.5）；
+    Δ segm = s42 −0.91 / s123 +0.38 → 均值 **−0.27**。
+    ⚠️ APs 分桶在小数据 val 上的桶内实例数少，单 seed 波动大，"APs +5.37"
+    的 seed42 信号大概率被 s123 证伪一半。
+  ② **M2b-s2024 已完成**（14:12 UTC）：segm **65.51**（bbox 66.98，
+    APs 32.70/AP75 72.19；轨迹 53.48/62.88/64.95/65.82/65.72/65.51）。
+    **M2b 三 seed APs = 47.46/49.37/32.70**（内部波动 16.8，s2024 甚至
+    低于 P0_res-s42 的 42.09）→ **APs 优势进一步崩塌**；三 seed segm =
+    65.15/66.14/65.51（均值 65.60，vs P0_res 已知 66.06/65.77 均值 65.92
+    → 至少 −0.3，无正向总分趋势）。
+- **（当前）wave1e/1f 收队 + KD1b 运行中（2026-09-08 03:36 UTC 更新）**：
+  - **P0_res-s2024 完成**（09-07 16:52 UTC）：segm **65.92**（bbox 67.14，
+    APs 45.51/AP75 73.30）→ **M2b 三 seed 终判：淘汰**。
+    配对 Δ segm = s42 −0.91 / s123 +0.38 / s2024 −0.41（均值 −0.31，t=−0.85
+    p≈0.50）；Δ APs = +5.37/−0.20/**−12.81**（均值 −2.55，t=−0.47）。
+    **BOTTOM_RES 保持 56**；P0_res 三 seed segm 66.06/65.77/65.92（σ≈0.15
+    极稳），APs 42.09/49.57/45.51（σ≈3.8——**APs 噪声主源是基线本身**，
+    单 seed 小目标结论实证噪声可达 ±13，必须 ≥3 seed）。
+  - **KD1 首轮：标定缺陷，未公平检验**（09-07 19:57 UTC exit=0）：segm
+    65.67（bbox 66.14，APs 35.83/AP75 73.44）vs P0_res(s42) 66.06 →
+    Δ −0.39。**根因**：loss_kd_bases ~13.7（前景像素 MSE×4 bases，无
+    per-basis 归一，blendmask.py `_distill_losses`），W_BASES=1.0 下蒸馏项
+    占总损失 93%，学生实际在"教师 bases 拟合优先"下训练。既不淘汰也
+    不晋级 KD 假设 → KD1b 重跑（类比 DQ1→DQ1b 的协议修正）。
+  - **KD1b 运行中**（09-08 03:35 UTC 启动，`tools/run_m65_wave1f_kd1b.sh`，
+    唯一改动 `MODEL.DISTILL.W_BASES 1.0→0.02`，kd_bases 归一后 ~0.27 与
+    任务损失 0.07~0.6 同量级；预计 ~06:35 UTC 完，~3h。中途 03:53 观察：
+    iter 2159，kd_bases 已从 4.7 衰减到 0.71，任务损失健康）。
+  - **AS1（FCOS-TAL）已实现并通过全部单测**（09-08，`tests/test_m65_as1.py`
+    8 项全过 + `test_m62_components.py` 回归全过 + quick_check 通过）：
+    `MODEL.FCOS.ASSIGN tal`（默认 default，P0 协议与 state_dict 位级不变）；
+    实现 `fcos_outputs.py::_tal_reassign`——候选 = center 域∩FPN range∩GT
+    框内，t=s^α·iou^β（α1/β6），每 GT topk=10（<32² 小目标 k=4），
+    位置冲突取 t 最大 GT，每 GT 保底 1 正点（全局最大 IoU 兜底，冲突
+    后终判），warmup 500 iter 保持默认指派（tal_iter buffer 入 state_dict，
+    旧 ckpt 缺键非致命）。量纲关键：reg_pred 是 stride 归一化单位（推理
+    469 行 r×s 反归一化），TAL 解码/写回均已对齐。
+    **接力链已挂**（`tools/watch_as1_after_kd1b.sh`，PID 13945）：KD1b
+    真实成功标记 → AS1 GPU 冒烟（150 iter，TAL_WARMUP=50 跨过激活，校验
+    [TAL] 统计 + 损失有限）→ `tools/run_m65_wave2_as1.sh` 全量（22k 同
+    P0_res 协议 + ASSIGN tal，单变量）。**AS1 全量期间禁改 `adet/`。**
+    预计 ~10:00 UTC 出终局。
+  - **FPS 基准已实测（M6.4 效率线收账）**：平台 M@512 batch1 =
+    **23.5 FPS / 42.5ms / 25.96M 参数 / 0.26GB**；R50-protonet @512 =
+    54.6 FPS / 18.3ms / 35.36M。验收线 ≥10 FPS 双达标；平台 0.49× 参数
+    上限（53.06M）。论文表述：平台以 0.43× R50 速度换 +1.7~+2.4 AP。
+  - **下一步**：KD1b 出分后判 KD 线去留；**AS1（FCOS-TAL）为 M6.5 最后
+    未实现的高期望组件**（漏斗 Wave 2，预期 +0.5~1.5），实现期间 KD1b
+    占 GPU 无冲突（TAL 只改 `fcos.py` assignment，需单测+冒烟后才上 GPU）。
+  ④ **KD1 实现档案（已复用于 KD1b）**：`MODEL.DISTILL.*` 配置 +
+     `BlendMask._distill_losses()`（teacher 冻结、每次蒸馏前强制 eval 防 BN
+     漂移；三路损失 = cls sigmoid MSE / reg L1 / bases 前景加权 MSE；
+     TEACHER_OPTS 用 KEY=VALUE 格式 shell 安全；单测 `tests/test_m65_kd1.py`）。
+     teacher = `output/m63d_straw_B`（B 变体 66.35），student = M@512，
+     teacher 吃 student 同款 512 输入（全卷积尺寸鲁棒）。
+     watcher（watch_kd1_after_s2024.sh）已完成使命消亡，无残留进程。
+     KD1/KD1b 期间禁改 `adet/`（KD1b 运行中，~06:35 UTC 前）。
+
+Strawberry 分辨率重议（M6.3e）全队收队 12:17：
 **P0_res = segm 66.06**（bbox 67.49，APs 42.1/APm 49.7/APl 71.6）vs R1_res 63.68 →
 **Δ +2.38**（416 协议 Δ 1.73 → 512 提升 0.65）。分辨率主要帮平台：P0_res 比 P0_full 65.42
 高 0.64，且 APs 42.1 反超 R1_res 38.4（小目标差转正）。但 P0_res 距新 +5 线 68.68 仍差
@@ -272,25 +388,25 @@ python tools/summarize_all.py output/m62_ --base L1b_P0
 预训练（+11.05，已用）。平台 vs R50 已收敛到 ~+1.8，**要达 +5 需把优势翻 ~3 倍**，
 靠堆单点组件不可行；必须换「跨任务/跨数据」或「容量+蒸馏」层级的杠杆。
 
-### 剩余可试杠杆（按对 +3 缺口的期望贡献排序，均为待决策项）
+### 剩余可试杠杆（2026-09-08 用户拍板后修订）
 
-1. **任务级迁移预训练**（期望大，成本最高，最可能兑现缺口）：先在某大规模通用/近域
-   分割数据集把完整 BlendMask（或仅 decoder+detect 头）预训练到收敛，再在小数据
-   wheat/Strawberry 微调——把 "+11 的预训练红利"从骨干级抬到任务级。⚠️ 需先明确
-   用哪个源数据（COCO-instance？/ 近域农业？），类目/分辨率迁移风险高，GPU 2-5 天。
-2. **MobileViGv2-B 容量上限**（~+1-2 期望，仅 Strawberry 跑得动）：B 在 wheat 协议
-   OOM（b7 16.2G/b6 15.7G > 16.4G 可用）→ 只在 Strawberry 原生低分辨率跑（~3h），
-   或等 GPU0/2/3 空闲再回 wheat。单独 B 补不满缺口。
-3. **蒸馏**：用 R50/大模型当 teacher 训 M 平台（架构接近更易迁移），期望 +1-2。
-4. **推理侧**：多尺度 TTA / 更大 test 分辨率，期望 +0.5-1（零训练成本，先跑 FPS）。
-5. **训练策略残余**：wheat strat 试 cosine+12k（clean 上 D3 +0.5 记录）；mask loss 加
-   小权重 Dice（M1）；FCOS quality=iou（E1）。单点都在 ±0.5 噪声级，凑不出 +3。
+1. ~~**任务级迁移预训练**~~ **❌ 用户否决（2026-09-08）**——不做 COCO/近域全模型
+   预训练再微调。剩余杠杆全部集中在 Strawberry 512 协议上的 M6.5 深度改造 + 推理侧。
+2. **MobileViGv2-B 容量上限**：已收队（66.35，仅 +0.93 over M，容量路不通）。
+3. **蒸馏**：KD1（W_BASES 标定缺陷）→ **KD1b 修正版运行中**（09-08 ~06:35 UTC 出）。
+4. **AS1（FCOS-TAL）**：已实现全测通过，watcher 接 KD1b 自动跑（~10:00 UTC 出）。
+5. **推理侧 TTA**：期望 +0.5-1，零训练成本，GPU 空闲即可跑（FPS 基准已收）。
+6. **MQ1/NK1/NK2**（M6.5 尾池）：仅在 KD1b/AS1 出正向信号后按漏斗继续；
+   全负则 M6.5 提前收官。
 
-**需用户拍板**：a) 是否接受"任务级迁移预训练"（大成本高风险，最可能兑现）；
-b) 或把 +5 目标绑定到某单一数据集（Strawberry 更现实）并集中资源；
-c) 或回归 ROADMAP 0.3 第二判定（Pareto 回退）当论文主结果。GPU 暂停中。
+**决策记录**：a) 任务级迁移预训练 ❌ 不做（2026-09-08）；b) c) 仍未定——
+若 KD1b/AS1/MQ1 仍凑不满 Strawberry ~2.6 缺口，回退方案 = ROADMAP 0.3
+第二判定（Pareto 回退：+1.7~+2.4 稳定优势 + 0.73× 参数 + 23.5 FPS 当论文主结果）。
 
-M6.4 尚缺：`summarize_all.py --ttest` 已实现；FPS 实测未跑（`tools/benchmark_fps.py`
+M6.5 已开始：DQ1/QFL-only 已实现并通过 `tests/test_m62_components.py`、配置构建和
+`py_compile` 验证；实验脚本为 `tools/run_m65_dq1.sh`，以 Strawberry 512 协议启动。
+QFL 只改 FCOS 分类目标为 detached box IoU quality，保留 scalar regression、centerness
+和其余 P0_res 组件，结果待出。M6.4 尚缺：`summarize_all.py --ttest` 已实现；FPS 实测未跑（`tools/benchmark_fps.py`
 已就绪）；basis CAM 可视化未做。已出的 1-seed 结果（strat/strawberry/plantv2 锚点 +
 平台）建议先固化成 M6.4 消融总表骨架。
 
