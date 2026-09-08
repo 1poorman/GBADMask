@@ -192,7 +192,23 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
     低于 P0_res-s42 的 42.09）→ **APs 优势进一步崩塌**；三 seed segm =
     65.15/66.14/65.51（均值 65.60，vs P0_res 已知 66.06/65.77 均值 65.92
     → 至少 −0.3，无正向总分趋势）。
-- **（当前）M6.6 骨干消融排队中（2026-09-08 08:40 UTC 挂队）+ AS1 收尾**：
+- **（当前）M6.6 骨干消融运行中（2026-09-08 08:55 UTC 重启）+ AS1 已终局**：
+  - **AS1（FCOS-TAL）终局：淘汰**（08:49 UTC exit=0）：segm **65.32**
+    （bbox 66.15，APs 48.79/AP75 72.58）vs P0_res(s42) 66.06 → **Δ −0.74**。
+    P0_res 三 seed σ≈0.15 → −0.74 是真实负效应（~5σ）。TAL 轨迹全程低于
+    P0_res（20k 时 Blossom 82.74 vs 基线 ~83）→ **V2 任务对齐线关闭**。
+    至此 M6.5 组件池：DQ1/HQ1/BR1/M2b/KD1b/AS1 全负，仅剩 MQ1/NK1/NK2
+    未试（期望值低、且 +5 缺口 2.6 已不可达）→ **M6.5 实质收官，建议
+    Pareto 回退当论文主结果（+1.7~+2.4 / 25.96M / 23.5 FPS），待用户
+    最终拍板**。
+  - **M6.6 首挂 08:50 秒崩（已修复重启）**：两个脚本 bug——①r50 臂
+    `MODEL.RESNETS.OUT_FEATURES "(res3,res4,res5)"` 字符串 vs yaml 列表
+    类型冲突（yaml 本就正确，删除覆盖即可）；②`runvig` 内 `shift 4` 后
+    引用 `$2/$3/$4` + `set -u` → 未绑定变量崩溃。**教训：shell 函数
+    用 shift 后绝不能再引用移走的参数；列表型 cfg 键不要用括号字符串
+    覆盖**。毒 START 标记已清（logs/m66_failed_0908.log.bak 留档），
+    08:55 重挂 watcher（`tools/watch_m66_after_as1.sh`）正常起跑：
+    首臂 r50bifpn 0.26 s/iter / 4.1GB（比 vigv2 平台更快更轻）。
   - **M6.6 骨干消融（用户 09-08 下达）**：两数据集 × 7 新臂，唯一变量=
     骨干，BiFPN(3,160)+ProtoNetV2+GC+FCOS 全同口径：
     `r50bifpn / vigv2-S+C3K2 / MobileViGv2-S / MobileViGv2-M（无 C3K2）/

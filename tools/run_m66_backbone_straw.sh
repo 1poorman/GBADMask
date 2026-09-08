@@ -40,7 +40,7 @@ run() {  # $1=tag；其余为 opts
 }
 
 runvig() {  # $1=tag $2=version $3=use_c3k2 $4=pretrained
-  local tag="m66_straw_$1"; shift 4
+  local tag="m66_straw_$1"
   if grep -q "M66_${tag}_DONE exit=0" "$MARK" 2>/dev/null; then
     echo "$tag 已完成，跳过"; return 0
   fi
@@ -60,14 +60,13 @@ runvig() {  # $1=tag $2=version $3=use_c3k2 $4=pretrained
   return 0
 }
 
-# 1) R50 + BiFPN（同颈对照）
+# 1) R50 + BiFPN（同颈对照；RESNETS.OUT_FEATURES 沿用 yaml 的 ["res3","res4","res5"]）
 tag=m66_straw_r50bifpn
 if ! grep -q "M66_${tag}_DONE exit=0" "$MARK" 2>/dev/null; then
   echo "===== START M66_${tag} $(date -u) =====" >> "$MARK"
   $PY tools/train_bl+.py --config-file configs/run-vigv2.yaml --num-gpus 1 \
       DATASETS.NAME Strawberry \
       MODEL.BACKBONE.NAME build_fcos_resnet_bifpn_backbone \
-      MODEL.RESNETS.OUT_FEATURES "(res3,res4,res5)" \
       MODEL.WEIGHTS "detectron2://ImageNetPretrained/MSRA/R-50.pkl" \
       MODEL.BASIS_MODULE.NAME ProtoNetV2 MODEL.BASIS_MODULE.ATTN gc \
       MODEL.BASIS_MODULE.NUM_CLASSES 7 MODEL.FCOS.NUM_CLASSES 7 \
