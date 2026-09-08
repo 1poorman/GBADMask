@@ -49,6 +49,38 @@ def compute_ctrness_targets(reg_targets):
     return torch.sqrt(ctrness)
 
 
+def quality_focal_loss(logits, targets, beta=2.0, reduction="sum"):
+    """Quality Focal Loss for sigmoid class logits and continuous targets.
+
+    Positive targets are detached IoU qualities in [0, 1], while background
+    targets remain zero.  The prediction-dependent weight focuses learning on
+    poorly calibrated samples without introducing a second quality branch.
+    """
+    pred_prob = logits.sigmoid()
+    scale_factor = (pred_prob - targets).abs().pow(beta)
+    loss = F.binary_cross_entropy_with_logits(
+        logits, targets, reduction="none") * scale_factor
+    if reduction == "sum":
+        return loss.sum()
+    if reduction == "mean":
+        return loss.mean()
+    if reduction == "none":
+        return loss
+    raise ValueError("Unsupported reduction: {}".format(reduction))
+
+
+def pairwise_iou_xyxy(boxes1, boxes2):
+    """IoU between two sets of xyxy boxes. Returns (len(boxes1), len(boxes2))."""
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    lt = torch.max(boxes1[:, None, :2], boxes2[None, :, :2])
+    rb = torch.min(boxes1[:, None, 2:], boxes2[None, :, 2:])
+    wh = (rb - lt).clamp(min=0)
+    inter = wh[..., 0] * wh[..., 1]
+    union = area1[:, None] + area2[None, :] - inter
+    return inter / union.clamp(min=1e-6)
+
+
 class FCOSOutputs(nn.Module):
     def __init__(self, cfg):
         super(FCOSOutputs, self).__init__()
@@ -91,6 +123,32 @@ class FCOSOutputs(nn.Module):
         self.moving_num_fg_momentum = 0.9
 
         self.loss_weight_cls = cfg.MODEL.FCOS.LOSS_WEIGHT_CLS
+        self.cls_loss = cfg.MODEL.FCOS.CLS_LOSS
+        self.qfl_beta = cfg.MODEL.FCOS.QFL_BETA
+        assert self.cls_loss in ("focal", "qfl"), \
+            'MODEL.FCOS.CLS_LOSS must be "focal" or "qfl"'
+
+        # AS1: task-aligned assignment (TOOD-style). Default stays "default"
+        # so the P0 protocol (and its state_dict) is bit-identical when off.
+        self.assign = cfg.MODEL.FCOS.ASSIGN
+        assert self.assign in ("default", "tal"), \
+            'MODEL.FCOS.ASSIGN must be "default" or "tal"'
+        self.tal_topk = cfg.MODEL.FCOS.TAL_TOPK
+        self.tal_topk_small = cfg.MODEL.FCOS.TAL_TOPK_SMALL
+        self.tal_small_area = cfg.MODEL.FCOS.TAL_SMALL_AREA
+        self.tal_alpha = cfg.MODEL.FCOS.TAL_ALPHA
+        self.tal_beta = cfg.MODEL.FCOS.TAL_BETA
+        self.tal_warmup = cfg.MODEL.FCOS.TAL_WARMUP
+        self.tal_log_period = cfg.MODEL.FCOS.TAL_LOG_PERIOD
+        assert self.tal_topk >= 1 and self.tal_topk_small >= 1 and \
+            self.tal_topk >= self.tal_topk_small, \
+            "TAL topk must be >= 1 and topk >= topk_small"
+        if self.assign == "tal":
+            # training-step counter for the warmup phase; stored so that
+            # resume keeps the phase consistent. Old checkpoints simply miss
+            # the key (non-fatal warning) and resume from 0.
+            self.register_buffer(
+                "tal_iter", torch.zeros((), dtype=torch.long))
 
     def _transpose(self, training_targets, num_loc_list):
         '''
@@ -322,7 +380,172 @@ class FCOSOutputs(nn.Module):
                 x.permute(0, 2, 3, 1).reshape(-1, x.size(1)) for x in top_feats
             ], dim=0,)
 
+        if self.assign == "tal":
+            self._tal_reassign(instances, gt_instances)
+
         return self.fcos_losses(instances)
+
+    @torch.no_grad()
+    def _tal_reassign(self, instances, gt_instances):
+        """AS1 (TOOD TAL): prediction-aware re-assignment of FCOS positives.
+
+        Replaces the default min-area assignment for locations of every image:
+          1. candidates = center-sampling region AND FPN size range AND inside
+             the GT box (same geometric constraints as the default assigner);
+          2. alignment metric t = sigmoid(cls)^alpha * IoU(pred_box, gt)^beta;
+          3. per-GT top-k by t (k = TAL_TOPK, or TAL_TOPK_SMALL for small GTs);
+          4. a location claimed by several GTs goes to the GT with max t;
+          5. a GT left without any positive falls back to its globally best
+             IoU location (last-write-wins on pathological collisions).
+
+        All targets are overwritten in place (labels / gt_inds / reg_targets)
+        under no_grad, so no gradient flows through the assignment itself.
+        gt_inds keep the global (image-major) GT index semantics used by the
+        Blender mask loss.
+        """
+        self.tal_iter += 1
+        if int(self.tal_iter) <= self.tal_warmup:
+            return
+
+        num_levels = len(self.strides)
+        soi = instances.reg_targets.new_tensor(
+            self.sizes_of_interest[:num_levels])  # (L, 2)
+        strides_t = instances.reg_targets.new_tensor(
+            [float(s) for s in self.strides])     # (L,)
+
+        # global (image-major) GT index offsets, matching target_inds semantics
+        gt_offsets = []
+        acc = 0
+        for t_im in gt_instances:
+            gt_offsets.append(acc)
+            acc += len(t_im)
+
+        K_total = instances.labels.numel()
+        new_labels = instances.labels.new_full((K_total,), self.num_classes)
+        new_gt_inds = instances.labels.new_full((K_total,), -1)
+        new_reg = instances.reg_targets.clone()
+
+        stats_gt, stats_pos, stats_fallback = 0, 0, 0
+        stats_cls = {}
+
+        for im_i, targets_per_im in enumerate(gt_instances):
+            bboxes = targets_per_im.gt_boxes.tensor
+            if bboxes.numel() == 0:
+                continue
+            sel = torch.nonzero(instances.im_inds == im_i).squeeze(1)
+            if sel.numel() == 0:
+                continue
+            G = bboxes.shape[0]
+            stats_gt += G
+            gt_cls = targets_per_im.gt_classes
+            locs = instances.locations[sel]
+            levels = instances.fpn_levels[sel]
+            logits = instances.logits_pred[sel]
+            reg = instances.reg_pred[sel]
+            strides_of = strides_t[levels]  # (Ki,)
+
+            # decode predicted boxes back to absolute image coordinates
+            pred_boxes = torch.stack([
+                locs[:, 0] - reg[:, 0] * strides_of,
+                locs[:, 1] - reg[:, 1] * strides_of,
+                locs[:, 0] + reg[:, 2] * strides_of,
+                locs[:, 1] + reg[:, 3] * strides_of,
+            ], dim=1)
+
+            iou = pairwise_iou_xyxy(pred_boxes, bboxes)      # (Ki, G)
+            scores = logits.sigmoid()[:, gt_cls]             # (Ki, G)
+            t = scores.pow(self.tal_alpha) * \
+                iou.clamp(min=1e-6).pow(self.tal_beta)
+
+            # geometric candidates (same constraints as the default assigner)
+            ltrb = torch.stack([
+                locs[:, 0, None] - bboxes[None, :, 0],
+                locs[:, 1, None] - bboxes[None, :, 1],
+                bboxes[None, :, 2] - locs[:, 0, None],
+                bboxes[None, :, 3] - locs[:, 1, None],
+            ], dim=2)                                       # (Ki, G, 4)
+            max_reg = ltrb.max(dim=2).values                # (Ki, G)
+            rng = soi[levels]                               # (Ki, 2)
+            in_level = (max_reg >= rng[:, None, 0]) & \
+                       (max_reg <= rng[:, None, 1])
+            if self.center_sample:
+                if targets_per_im.has("gt_bitmasks_full"):
+                    bitmasks = targets_per_im.gt_bitmasks_full
+                else:
+                    bitmasks = None
+                num_loc_list = [
+                    int((levels == li).sum()) for li in range(num_levels)]
+                in_center = self.get_sample_region(
+                    bboxes, self.strides, num_loc_list,
+                    locs[:, 0], locs[:, 1],
+                    bitmasks=bitmasks, radius=self.radius)
+                if in_center.dim() == 1:
+                    # degenerate early-return of get_sample_region: all False
+                    in_center = in_center[:, None].expand(-1, G)
+                in_center = in_center.bool()
+            else:
+                in_center = (ltrb > 0).all(dim=2)
+            cand = in_center & in_level
+
+            # per-GT top-k of t within candidates
+            areas = (bboxes[:, 2] - bboxes[:, 0]) * \
+                    (bboxes[:, 3] - bboxes[:, 1])
+            ks = torch.where(
+                areas < self.tal_small_area,
+                torch.as_tensor(self.tal_topk_small, device=t.device),
+                torch.as_tensor(self.tal_topk, device=t.device))
+            kmax = min(int(ks.max()), sel.numel())
+            t_masked = t.masked_fill(~cand, -1.0)
+            topv, topi = t_masked.topk(kmax, dim=0)          # (kmax, G)
+            valid = (topv > 0) & \
+                    (torch.arange(kmax, device=t.device)[:, None] < ks[None, :])
+            sel_t = t.new_zeros(sel.numel(), G)
+            gi = torch.arange(G, device=t.device)[None, :].expand_as(topi)
+            sel_t[topi[valid], gi[valid]] = t[topi[valid], gi[valid]]
+
+            # conflict resolution: each claimed location goes to its best GT
+            best_t, best_g = sel_t.max(dim=1)
+            has = best_t > 0
+
+            # fallback: guarantee at least one positive per GT (checked on the
+            # FINAL assignment, i.e. after conflicts may have stolen a GT's
+            # entire top-k). Rare pathological collisions (two empty GTs
+            # sharing the same best-IoU location) are last-write-wins.
+            final_counts = t.new_zeros(G, dtype=torch.long)
+            final_counts.scatter_add_(
+                0, best_g[has], torch.ones_like(best_g[has], dtype=torch.long))
+            for g in torch.nonzero(final_counts == 0).squeeze(1).tolist():
+                fb = int(iou[:, g].argmax().item())
+                best_t[fb] = float("inf")
+                best_g[fb] = g
+                has[fb] = True
+                final_counts[g] = 1
+                stats_fallback += 1
+
+            pos_local = torch.nonzero(has).squeeze(1)
+            gidx = sel[pos_local]
+            assigned = best_g[pos_local]
+            new_labels[gidx] = gt_cls[assigned]
+            new_gt_inds[gidx] = gt_offsets[im_i] + assigned
+            new_reg[gidx] = ltrb[pos_local, assigned] / \
+                strides_of[pos_local, None]
+            stats_pos += pos_local.numel()
+            for c in gt_cls[assigned].tolist():
+                stats_cls[c] = stats_cls.get(c, 0) + 1
+
+        instances.labels = new_labels
+        instances.gt_inds = new_gt_inds
+        instances.reg_targets = new_reg
+
+        if int(self.tal_iter) % self.tal_log_period == 0:
+            pg = stats_pos / max(stats_gt, 1)
+            cls_str = " ".join(
+                "c{}:{}".format(c, n)
+                for c, n in sorted(stats_cls.items()))
+            logger.info(
+                "[TAL] iter {} gts {} pos {} pos/gt {:.1f} fallback {} [{}]".format(
+                    int(self.tal_iter), stats_gt, stats_pos, pg,
+                    stats_fallback, cls_str))
 
     def fcos_losses(self, instances):
         losses, extras = {}, {}
@@ -338,17 +561,26 @@ class FCOSOutputs(nn.Module):
         num_pos_local = torch.ones_like(pos_inds).sum()
         num_pos_avg = max(reduce_mean(num_pos_local).item(), 1.0)
 
-        # prepare one_hot
+        # Prepare the classification target. QFL uses the current box IoU as
+        # a detached continuous target for the positive class.
         class_target = torch.zeros_like(instances.logits_pred)
-        class_target[pos_inds, labels[pos_inds]] = 1
-
-        class_loss = sigmoid_focal_loss_jit(
-            instances.logits_pred,
-            class_target,
-            alpha=self.focal_loss_alpha,
-            gamma=self.focal_loss_gamma,
-            reduction="sum"
-        )
+        if self.cls_loss == "qfl":
+            if pos_inds.numel() > 0:
+                pos_ious, _ = compute_ious(
+                    instances.reg_pred[pos_inds],
+                    instances.reg_targets[pos_inds])
+                class_target[pos_inds, labels[pos_inds]] = pos_ious.detach().clamp(0, 1)
+            class_loss = quality_focal_loss(
+                instances.logits_pred, class_target, beta=self.qfl_beta)
+        else:
+            class_target[pos_inds, labels[pos_inds]] = 1
+            class_loss = sigmoid_focal_loss_jit(
+                instances.logits_pred,
+                class_target,
+                alpha=self.focal_loss_alpha,
+                gamma=self.focal_loss_gamma,
+                reduction="sum"
+            )
 
         if self.loss_normalizer_cls == "moving_fg":
             self.moving_num_fg = self.moving_num_fg_momentum * self.moving_num_fg + (

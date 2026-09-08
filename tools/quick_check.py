@@ -77,6 +77,11 @@ def main():
                           "MODEL.BASIS_MODULE.SEM_LOSS", "focal_tversky",
                           "MODEL.BASIS_MODULE.SEM_DETACH", "False",
                           "MODEL.BASIS_MODULE.LOSS_WEIGHT", "0.05"]),
+        ("hq1-detail  ", ["MODEL.BACKBONE.NAME", "build_fcos_mobilevigv2_csp_bifpn_backbone",
+                          "MODEL.VIG.VERSION", "m",
+                          "MODEL.VIG.PRETRAINED", "weights/MobileViG_V2_M_Class.pth",
+                          "MODEL.BiFPN.PASSTHROUGH", "['res2']",
+                          "MODEL.BASIS_MODULE.DETAIL_ON", "True"]),
     ]
     print("%-14s %10s %8s %9s" % ("config", "params(M)", "sem_loss", "total"))
     for name, opts in cases:

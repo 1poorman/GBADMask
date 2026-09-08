@@ -9,6 +9,37 @@ def build_blender(cfg):
     return Blender(cfg)
 
 
+def boundary_weighted_mask_loss(pred_logits, gt_masks, boundary_weight,
+                                 boundary_kernel=3):
+    """BR1-lite（M6.5）：边界加权的实例 mask BCE。
+
+    在 GT mask 的形态学边界带（dilate − erode，maxpool 实现）内把 BCE 权重
+    提到 (1 + boundary_weight)，带外保持 1，再按逐实例加权均值聚合——与原
+    mean(dim=-1) 的量级可比，仅重新分配像素间相对权重（零参数）。
+
+    Args:
+        pred_logits: (N, H*W) 实例 mask logits
+        gt_masks: (N, H*W) 0/1 GT
+        boundary_weight: 边界带内额外权重 λ；0 时严格退化为原 BCE 均值
+        boundary_kernel: 形态学核大小（奇数）
+    Returns:
+        (N,) 每实例加权平均损失
+    """
+    losses = F.binary_cross_entropy_with_logits(
+        pred_logits, gt_masks.to(dtype=torch.float32), reduction="none")
+    if boundary_weight <= 0:
+        return losses.mean(dim=-1)
+    N = gt_masks.size(0)
+    res = int(gt_masks.size(1) ** 0.5)
+    gm = gt_masks.view(N, 1, res, res).float()
+    pad = boundary_kernel // 2
+    dil = F.max_pool2d(gm, boundary_kernel, 1, pad)
+    ero = -F.max_pool2d(-gm, boundary_kernel, 1, pad)
+    band = (dil - ero).clamp(0, 1).view(N, -1)
+    w = 1.0 + boundary_weight * band
+    return (losses * w).sum(dim=-1) / w.sum(dim=-1).clamp(min=1.0)
+
+
 class Blender(object):
     def __init__(self, cfg):
 
@@ -20,6 +51,8 @@ class Blender(object):
         self.attn_size         = cfg.MODEL.BLENDMASK.ATTN_SIZE
         self.top_interp        = cfg.MODEL.BLENDMASK.TOP_INTERP
         num_bases              = cfg.MODEL.BASIS_MODULE.NUM_BASES
+        self.boundary_weight   = cfg.MODEL.BLENDMASK.BOUNDARY_LOSS_WEIGHT
+        self.boundary_kernel   = cfg.MODEL.BLENDMASK.BOUNDARY_KERNEL
         # fmt: on
 
         self.attn_len = num_bases * self.attn_size * self.attn_size
@@ -63,10 +96,11 @@ class Blender(object):
 
             gt_ctr = dense_info.gt_ctrs
             loss_denorm = proposals["loss_denorm"]
-            mask_losses = F.binary_cross_entropy_with_logits(
-                pred_mask_logits, gt_masks.to(dtype=torch.float32), reduction="none")
-            mask_loss = ((mask_losses.mean(dim=-1) * gt_ctr).sum()
-                         / loss_denorm)
+            # BR1-lite：边界加权 BCE（BOUNDARY_LOSS_WEIGHT=0 时严格退化为原版）
+            per_inst = boundary_weighted_mask_loss(
+                pred_mask_logits, gt_masks, self.boundary_weight,
+                self.boundary_kernel)
+            mask_loss = (per_inst * gt_ctr).sum() / loss_denorm
             return None, {"loss_mask": mask_loss}
         else:
             # no proposals

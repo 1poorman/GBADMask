@@ -97,6 +97,10 @@ _C.MODEL.FCOS.THRESH_WITH_CTR = False
 # Focal loss parameters
 _C.MODEL.FCOS.LOSS_ALPHA = 0.25
 _C.MODEL.FCOS.LOSS_GAMMA = 2.0
+# Classification objective. ``focal`` preserves the original FCOS behavior;
+# ``qfl`` uses detached box IoU as the positive classification quality target.
+_C.MODEL.FCOS.CLS_LOSS = "focal"
+_C.MODEL.FCOS.QFL_BETA = 2.0
 
 # The normalizer of the classification loss
 # The normalizer can be "fg" (normalized by the number of the foreground samples),
@@ -118,6 +122,20 @@ _C.MODEL.FCOS.POS_RADIUS = 1.5
 _C.MODEL.FCOS.LOC_LOSS_TYPE = 'giou'
 _C.MODEL.FCOS.YIELD_PROPOSAL = False
 _C.MODEL.FCOS.YIELD_BOX_FEATURES = False
+
+# AS1: task-aligned assignment (TOOD). "default" keeps the original
+# center-sampling + FPN range + min-area assignment (P0 protocol);
+# "tal" re-assigns positives by t = s^alpha * iou^beta top-k per GT.
+_C.MODEL.FCOS.ASSIGN = "default"
+_C.MODEL.FCOS.TAL_TOPK = 10
+# small GTs (area < TAL_SMALL_AREA) use an independent (smaller) k
+_C.MODEL.FCOS.TAL_TOPK_SMALL = 4
+_C.MODEL.FCOS.TAL_SMALL_AREA = 1024.0
+_C.MODEL.FCOS.TAL_ALPHA = 1.0
+_C.MODEL.FCOS.TAL_BETA = 6.0
+# first TAL_WARMUP iterations keep the default assignment (cold start)
+_C.MODEL.FCOS.TAL_WARMUP = 500
+_C.MODEL.FCOS.TAL_LOG_PERIOD = 500
 
 # ---------------------------------------------------------------------------- #
 # VoVNet backbone
@@ -172,6 +190,24 @@ _C.MODEL.BLENDMASK.POOLER_SAMPLING_RATIO = 1
 _C.MODEL.BLENDMASK.POOLER_SCALES = (0.25,)
 _C.MODEL.BLENDMASK.INSTANCE_LOSS_WEIGHT = 1.0
 _C.MODEL.BLENDMASK.VISUALIZE = False
+# BR1-lite（M6.5）：GT 形态学边界带内的 mask BCE 权重 = 1 + 该值。
+# 0.0 = 关闭（严格原版行为）。λ 过大易把训练推向边界过拟合，首轮只试保守值。
+_C.MODEL.BLENDMASK.BOUNDARY_LOSS_WEIGHT = 0.0
+# 形态学边界带的核大小（奇数）；56/64 分辨率下 3 约对应 1-2 像素边界环
+_C.MODEL.BLENDMASK.BOUNDARY_KERNEL = 3
+# KD1（M6.5）检测+mask 蒸馏：teacher 配置与权重路径。
+# WEIGHTS 为空 = 关闭。TEACHER_* 描述 teacher 的构建覆盖（与 student 同
+# META_ARCHITECTURE/Blender/BasisModule；典型用法：VIG.VERSION=b 的
+# P0 协议 teacher 蒸馏 M 平台 student）。
+_C.MODEL.DISTILL = CN()
+_C.MODEL.DISTILL.WEIGHTS = ""
+_C.MODEL.DISTILL.TEACHER_OPTS = ""
+# 蒸馏损失权重
+_C.MODEL.DISTILL.W_CLS = 1.0
+_C.MODEL.DISTILL.W_REG = 0.25
+_C.MODEL.DISTILL.W_BASES = 1.0
+# 蒸馏作用区域：teacher 前景质量图高于阈值的像素（0 = 全图均匀蒸馏）
+_C.MODEL.DISTILL.FG_THRESH = 0.1
 
 # ---------------------------------------------------------------------------- #
 # Vision GNN 骨干（cspvig / Lcspvig）
@@ -243,6 +279,12 @@ _C.MODEL.BASIS_MODULE.NUM_CONVS = 3
 _C.MODEL.BASIS_MODULE.COMMON_STRIDE = 8
 _C.MODEL.BASIS_MODULE.NUM_CLASSES = 80
 _C.MODEL.BASIS_MODULE.LOSS_WEIGHT = 0.3
+# HQ1 高分辨率 detail 分支（M6.5）：从 backbone 透传的高分辨率特征（默认 res2，
+# 需配合 MODEL.BiFPN.PASSTHROUGH=["res2"]）提取细节，与低层分支并列 concat 融合。
+# 默认 False = ProtoNetV2 行为与旧 checkpoint 完全一致。
+_C.MODEL.BASIS_MODULE.DETAIL_ON = False
+_C.MODEL.BASIS_MODULE.DETAIL_SOURCE = "res2"
+_C.MODEL.BASIS_MODULE.DETAIL_DIM = 24
 
 # ---------------------------------------------------------------------------- #
 # MEInst Head
@@ -395,6 +437,9 @@ _C.MODEL.BiFPN.UPSAMPLE = "nearest"
 #   "none" -- 不加（默认）
 #   "eca"  -- ECA，无降维的一维卷积通道注意力，参数量仅 kernel_size 个
 _C.MODEL.BiFPN.ATTN = "none"
+# 额外透传的 bottom_up 特征名（如 ["res2"]）：不参与 BiFPN 融合，仅在输出 dict
+# 中原样透传，供 mask/basis 分支做高分辨率 detail（M6.5 HQ1）。默认空 = 行为不变。
+_C.MODEL.BiFPN.PASSTHROUGH = []
 
 # ---------------------------------------------------------------------------- #
 # SOLOv2 Options

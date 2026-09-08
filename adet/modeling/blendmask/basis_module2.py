@@ -60,6 +60,18 @@ class ProtoNetV2(nn.Module):
 
         feature_channels = {k: v.channels for k, v in input_shape.items()}
 
+        # HQ1（M6.5）高分辨率 detail 分支：默认关闭。开启时从 DETAIL_SOURCE
+        # （需为 backbone 透传特征，如 res2，见 MODEL.BiFPN.PASSTHROUGH）提取
+        # 高分辨率细节，与低层分支并列 concat 融合，改善小目标/边界细节。
+        self.detail_on = cfg.MODEL.BASIS_MODULE.DETAIL_ON
+        self.detail_source = cfg.MODEL.BASIS_MODULE.DETAIL_SOURCE
+        detail_dim = cfg.MODEL.BASIS_MODULE.DETAIL_DIM
+        if self.detail_on:
+            if self.detail_source not in feature_channels:
+                raise ValueError(
+                    "BASIS_MODULE.DETAIL_SOURCE={} 不在 backbone 输出中，"
+                    "请确认 MODEL.BiFPN.PASSTHROUGH 包含它".format(self.detail_source))
+
         # 低层细节分支：1×1 卷积降维，padding=0（原实现误用 padding=1，
         # 对 1×1 卷积无意义且会使空间尺寸 +2，靠后续插值掩盖）
         self.conv1 = nn.Conv2d(
@@ -81,7 +93,12 @@ class ProtoNetV2(nn.Module):
             cfg.MODEL.BASIS_MODULE.SEM_LOSS, do_bg=False)
 
         conv_block = conv_with_kaiming_uniform(norm, True)  # conv relu bn
-        self.concat = conv_block(planes + low_dim, planes, 3, 1)
+        concat_in = planes + low_dim + (detail_dim if self.detail_on else 0)
+        self.concat = conv_block(concat_in, planes, 3, 1)
+        if self.detail_on:
+            # res2 等高分辨率特征 → detail_dim 通道的细节分支（Conv-BN-ReLU）
+            self.detail_refine = conv_block(
+                feature_channels[self.detail_source], detail_dim, 3, 1)
         self.conv2 = nn.Sequential(
             nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(planes),
@@ -144,8 +161,15 @@ class ProtoNetV2(nn.Module):
         low_feat = F.interpolate(
             low_feat, fre.size()[2:], mode="bilinear", align_corners=True)
 
-        # 注意力加权的低层细节 + 深层语义，concat 后降维
+        # 注意力加权的低层细节 + 深层语义，concat 后降维；
+        # HQ1 开启时再并列拼接一条高分辨率 detail 分支（对齐到 fre 尺寸）
         x = torch.cat((self.attn_low(low_feat), fre), 1)
+        if self.detail_on:
+            detail = self.detail_refine(features[self.detail_source])
+            if detail.size()[2:] != fre.size()[2:]:
+                detail = F.interpolate(
+                    detail, fre.size()[2:], mode="bilinear", align_corners=True)
+            x = torch.cat((x, detail), 1)
         x = self.concat(x)
         outputs = {"bases": [self.conv2(x)]}
 

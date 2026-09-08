@@ -326,7 +326,7 @@ class BiFPN(Backbone):
 
     def __init__(
         self, bottom_up, in_features, out_channels, num_top_levels, num_repeats,
-        norm="", upsample="nearest", attn="none"
+        norm="", upsample="nearest", attn="none", passthrough=()
     ):
         """
         Args:
@@ -366,11 +366,27 @@ class BiFPN(Backbone):
 
         # generate output features
         self._out_features = ["p{}".format(split_name(name)[1]) for name in in_features]
+        # 参与 BiFPN 融合的输出层名（passthrough 特征不在其中，见下）
+        self._fuse_features = list(self._out_features)
         self._out_feature_strides = {
             out_name: bottom_up_output_shapes[in_name].stride
             for out_name, in_name in zip(self._out_features, in_features)
         }
         self._out_feature_channels = {k: out_channels for k in self._out_features}
+
+        # HQ1 (M6.5)：额外透传特征（如 res2）——不参与 BiFPN 融合，仅在输出中
+        # 原样透传给 mask/basis 分支做高分辨率 detail。加入 _out_features 使
+        # output_shape() 对外声明这些层（FCOS/BiFPN 融合路径不受影响）。
+        self.passthrough = list(passthrough)
+        for name in self.passthrough:
+            if name in self._out_features:
+                raise ValueError("passthrough 特征名 {} 与融合输出冲突".format(name))
+            if name not in bottom_up_output_shapes:
+                raise ValueError(
+                    "passthrough 特征 {} 不在 bottom_up 输出中（检查 RESNETS.OUT_FEATURES）".format(name))
+            self._out_features.append(name)
+            self._out_feature_strides[name] = bottom_up_output_shapes[name].stride
+            self._out_feature_channels[name] = bottom_up_output_shapes[name].channels
 
         # build bifpn
         self.repeated_bifpn = nn.ModuleList()
@@ -381,7 +397,7 @@ class BiFPN(Backbone):
                 ]
             else:
                 in_channels_list = [
-                    self._out_feature_channels[name] for name in self._out_features
+                    self._out_feature_channels[name] for name in self._fuse_features
                 ]
             self.repeated_bifpn.append(SingleBiFPN(
                 in_channels_list, out_channels, norm, upsample, attn
@@ -410,7 +426,10 @@ class BiFPN(Backbone):
         for bifpn in self.repeated_bifpn:
              feats = bifpn(feats)
 
-        return dict(zip(self._out_features, feats))
+        out = dict(zip(self._fuse_features, feats))
+        for name in self.passthrough:
+            out[name] = bottom_up_features[name]
+        return out
 
 
 def _assert_strides_are_log2_contiguous(strides):
@@ -449,7 +468,8 @@ def build_fcos_resnet_bifpn_backbone(cfg, input_shape: ShapeSpec):
         num_repeats=num_repeats,
         norm=cfg.MODEL.BiFPN.NORM,
         upsample=cfg.MODEL.BiFPN.UPSAMPLE,
-        attn=cfg.MODEL.BiFPN.ATTN
+        attn=cfg.MODEL.BiFPN.ATTN,
+        passthrough=cfg.MODEL.BiFPN.PASSTHROUGH
     )
     return backbone
 
@@ -476,7 +496,8 @@ def build_fcos_cspvig_bifpn_backbone(cfg, input_shape: ShapeSpec):
         num_repeats=num_repeats,
         norm=cfg.MODEL.BiFPN.NORM,
         upsample=cfg.MODEL.BiFPN.UPSAMPLE,
-        attn=cfg.MODEL.BiFPN.ATTN
+        attn=cfg.MODEL.BiFPN.ATTN,
+        passthrough=cfg.MODEL.BiFPN.PASSTHROUGH
     )
     return backbone
 
@@ -504,7 +525,8 @@ def build_fcos_Lcspvig_bifpn_backbone(cfg, input_shape: ShapeSpec):
         num_repeats=num_repeats,
         norm=cfg.MODEL.BiFPN.NORM,
         upsample=cfg.MODEL.BiFPN.UPSAMPLE,
-        attn=cfg.MODEL.BiFPN.ATTN
+        attn=cfg.MODEL.BiFPN.ATTN,
+        passthrough=cfg.MODEL.BiFPN.PASSTHROUGH
     )
     return backbone
 

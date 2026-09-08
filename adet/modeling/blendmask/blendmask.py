@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
+import logging
+
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from detectron2.structures import ImageList
 from detectron2.modeling.postprocessing import detector_postprocess, sem_seg_postprocess
@@ -63,7 +66,115 @@ class BlendMask(nn.Module):
         pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(self.device).view(3, 1, 1)
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
+
+        # KD1（M6.5）：检测+mask 蒸馏。WEIGHTS 为空时完全关闭（零行为差异）。
+        self.distill_cfg = {
+            "weights": cfg.MODEL.DISTILL.WEIGHTS,
+            "teacher_opts": cfg.MODEL.DISTILL.TEACHER_OPTS,
+            "w_cls": cfg.MODEL.DISTILL.W_CLS,
+            "w_reg": cfg.MODEL.DISTILL.W_REG,
+            "w_bases": cfg.MODEL.DISTILL.W_BASES,
+            "fg_thresh": cfg.MODEL.DISTILL.FG_THRESH,
+        }
+        self.teacher = None
+        if cfg.MODEL.DISTILL.WEIGHTS:
+            self._build_teacher(cfg)
         self.to(self.device)
+
+    def _build_teacher(self, cfg):
+        """构建冻结的 teacher（同 META_ARCHITECTURE，覆盖 TEACHER_OPTS 指定的
+        架构差异如 VIG.VERSION=b），加载 MODEL.DISTILL.WEIGHTS。"""
+        from detectron2.checkpoint import DetectionCheckpointer
+        tcfg = cfg.clone()
+        tcfg.defrost()
+        opts = self.distill_cfg["teacher_opts"]
+        if opts:
+            # 兼容两种格式：YAML 风格 KEY=VALUE（shell 安全，推荐）与
+            # merge_from_list 风格 KEY VALUE（空格分隔，仅在代码内构造时用）
+            tokens = opts.split()
+            if "=" in tokens[0]:
+                pairs = []
+                for tok in tokens:
+                    key, _, val = tok.partition("=")
+                    pairs.extend([key, val])
+            else:
+                pairs = tokens
+            tcfg.merge_from_list(pairs)
+        # teacher 与 student 输入分辨率一致（由 run 脚本保证），此处只覆盖
+        # checkpoint 路径本身，避免 student 的 WEIGHTS（通常为空）串扰。
+        tcfg.MODEL.WEIGHTS = ""
+        # 构建时递归保护：teacher 构建中不再创建 teacher
+        saved = cfg.MODEL.DISTILL.WEIGHTS
+        try:
+            tcfg.MODEL.DISTILL.WEIGHTS = ""
+            teacher = META_ARCH_REGISTRY.get(tcfg.MODEL.META_ARCHITECTURE)(tcfg)
+        finally:
+            tcfg.MODEL.DISTILL.WEIGHTS = saved
+        DetectionCheckpointer(teacher).load(self.distill_cfg["weights"])
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+        self.teacher = teacher
+        logger = logging.getLogger(__name__)
+        logger.info("KD1 teacher built from {} (opts: {})".format(
+            self.distill_cfg["weights"], self.distill_cfg["teacher_opts"]))
+
+    def _distill_losses(self, batched_inputs, images, features):
+        """teacher 前向 + 三路蒸馏损失（cls sigmoid / reg L1 / bases 特征 MSELoss）。
+
+        teacher 与 student 共享同一 ImageList（同 padding、同输入分辨率），因此
+        FPN 各层像素一一对应；bases 层按 pooler 空间对齐（teacher/student 的
+        basis tower 输出分辨率一致，均为 in_features[0] 上采样 2×）。
+        """
+        cfg_w = self.distill_cfg
+        with torch.no_grad():
+            # m1.train() 会级联把 teacher 也置为 train 模式（BN 统计漂移），
+            # 每次蒸馏前强制 eval，保证 teacher 行为恒定。
+            self.teacher.eval()
+            t_images = [x["image"].to(self.device) for x in batched_inputs]
+            t_images = [self.teacher.normalizer(x) for x in t_images]
+            t_images = ImageList.from_tensors(
+                t_images, self.teacher.backbone.size_divisibility)
+            # 与 student 对齐到同一 padded 尺寸（teacher/student 分辨率一致时天然相同）
+            if (t_images.tensor.shape[-2:] != images.tensor.shape[-2:]):
+                return {}
+            t_features = self.teacher.backbone(t_images.tensor)
+            t_logits, t_reg, t_ctr, t_top, _ = self.teacher.proposal_generator.forward_head(
+                t_features, self.teacher.top_layer)
+            t_basis_out, _ = self.teacher.basis_module(t_features)
+
+        # student 侧：重用主 forward 已算的 features，但 head 输出需重新取
+        # （主 forward 走 proposal_generator 内部，这里直接调 forward_head）
+        s_logits, s_reg, s_ctr, s_top, _ = self.proposal_generator.forward_head(
+            features, self.top_layer)
+        s_basis_out, _ = self.basis_module(features)
+
+        losses = {}
+        # 1) 分类蒸馏：sigmoid 后 BCE（对概率蒸馏，量级稳定）
+        cls_loss = 0.0
+        for tl, sl in zip(t_logits, s_logits):
+            cls_loss = cls_loss + F.mse_loss(sl.sigmoid(), tl.sigmoid())
+        losses["loss_kd_cls"] = cls_loss * cfg_w["w_cls"]
+        # 2) 回归蒸馏：L1（relu 后的距离图，逐层）
+        reg_loss = 0.0
+        for tr, sr in zip(t_reg, s_reg):
+            reg_loss = reg_loss + F.l1_loss(sr, tr)
+        losses["loss_kd_reg"] = reg_loss * cfg_w["w_reg"]
+        # 3) bases 特征蒸馏：teacher 前景区域加权 MSELoss
+        bases_loss = 0.0
+        for t_b, s_b in zip(t_basis_out["bases"], s_basis_out["bases"]):
+            if t_b.shape != s_b.shape:
+                t_b = F.interpolate(t_b, s_b.shape[-2:], mode="bilinear",
+                                    align_corners=False)
+            # 前景质量图：teacher bases 的均值幅度作为逐像素权重
+            if cfg_w["fg_thresh"] > 0:
+                w = (t_b.abs().mean(dim=1, keepdim=True) > cfg_w["fg_thresh"]).float()
+                denom = w.sum().clamp(min=1.0)
+                bases_loss = bases_loss + (F.mse_loss(s_b, t_b, reduction="none") * w).sum() / denom
+            else:
+                bases_loss = bases_loss + F.mse_loss(s_b, t_b)
+        losses["loss_kd_bases"] = bases_loss * cfg_w["w_bases"]
+        return losses
 
     def forward(self, batched_inputs):
         """
@@ -125,6 +236,8 @@ class BlendMask(nn.Module):
             losses.update(basis_losses)
             losses.update({k: v * self.instance_loss_weight for k, v in detector_losses.items()})
             losses.update(proposal_losses)
+            if self.teacher is not None:
+                losses.update(self._distill_losses(batched_inputs, images, features))
             if self.combine_on:
                 losses.update(sem_seg_losses)
             return losses

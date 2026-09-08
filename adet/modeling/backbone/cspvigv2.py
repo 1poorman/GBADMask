@@ -317,6 +317,14 @@ class MobileViGv2_CSP(Backbone):
         self._out_feature_strides = {
             "res{}".format(j + 2): 2 ** (j + 2) for j in range(len(channels))
         }
+        # 暴露全部 stage（res2-res5）：forward 本就返回全部四层，output_shape()
+        # 同步声明，使 BiFPN PASSTHROUGH 等下游（HQ1 detail 分支）可按名取用。
+        # 传入的 out_features 必须是它的子集（BiFPN.IN_FEATURES 只取融合所需层）。
+        self._out_features = list(self._out_feature_channels.keys())
+        for f in out_features:
+            if f not in self._out_features:
+                raise ValueError("out_features 含未知层 {}（可选 {}）".format(
+                    f, self._out_features))
 
         if pretrained:
             self.load_mobilevigv2_pretrained(pretrained)
@@ -453,5 +461,6 @@ def build_fcos_mobilevigv2_csp_bifpn_backbone(cfg, input_shape: ShapeSpec):
         norm=cfg.MODEL.BiFPN.NORM,
         upsample=cfg.MODEL.BiFPN.UPSAMPLE,
         attn=cfg.MODEL.BiFPN.ATTN,
+        passthrough=cfg.MODEL.BiFPN.PASSTHROUGH,
     )
     return backbone
