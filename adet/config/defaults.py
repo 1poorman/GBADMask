@@ -234,6 +234,16 @@ _C.MODEL.VIG.DROP_PATH = 0.1
 # 是否启用 C3K2（C2f 风格）多分支融合；False = 退化为原始 MobileViGv2 串行堆叠（消融用）
 _C.MODEL.VIG.USE_C3K2 = True
 
+# M6.6 骨干消融：第三方轻量骨干（mobile_bb.py 统一接入）
+#   MODEL_NAME: "mnv3_l"（MobileNetV3-Large，timm 原生）/ "mnv4_s"
+#   （MobileNetV4-Conv-Small，自实现）/ "lsnet_t"（LSNet-T，vendored）
+#   WEIGHTS: ImageNet 预训练权重路径（空 = 随机初始化，仅冒烟用）
+#   INPUT_SIZE: 构造参考输入（LSNet 注意力偏置表按此尺寸初始化后插值）
+_C.MODEL.MOBILE_BB = CN()
+_C.MODEL.MOBILE_BB.MODEL_NAME = ""
+_C.MODEL.MOBILE_BB.WEIGHTS = ""
+_C.MODEL.MOBILE_BB.INPUT_SIZE = 512
+
 # ---------------------------------------------------------------------------- #
 # Basis Module Options
 # ---------------------------------------------------------------------------- #

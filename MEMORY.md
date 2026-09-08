@@ -1,6 +1,6 @@
 # GBADMask 工作记忆（MEMORY.md）
 
-> 最后更新：2026-09-08
+> 最后更新：2026-09-08（M6.6 骨干消融挂队）
 > 用途：会话交接。新会话请先读本文件，再读 ROADMAP.md 的 M6.2/M6.3/M6.5 章节。
 
 ---
@@ -192,7 +192,56 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
     低于 P0_res-s42 的 42.09）→ **APs 优势进一步崩塌**；三 seed segm =
     65.15/66.14/65.51（均值 65.60，vs P0_res 已知 66.06/65.77 均值 65.92
     → 至少 −0.3，无正向总分趋势）。
-- **（当前）wave1e/1f 收队 + KD1b 运行中（2026-09-08 03:36 UTC 更新）**：
+- **（当前）M6.6 骨干消融排队中（2026-09-08 08:40 UTC 挂队）+ AS1 收尾**：
+  - **M6.6 骨干消融（用户 09-08 下达）**：两数据集 × 7 新臂，唯一变量=
+    骨干，BiFPN(3,160)+ProtoNetV2+GC+FCOS 全同口径：
+    `r50bifpn / vigv2-S+C3K2 / MobileViGv2-S / MobileViGv2-M（无 C3K2）/
+    MobileNetV3-L / MobileNetV4-Conv-S / LSNet-T` + 已有锚点
+    （straw：P0_res 66.06 / R1_res 63.68；wheat strat：P0 15.71 / R1 13.87）。
+    统一 1-seed（42）筛选，入围者后补 3 seed。
+  - **骨干可得性核查结论**：MobileNetV5 在 timm main 存在（mobilenetv5.py）
+    但仅 Gemma-3n encoder 权重（非 IN-1k、含 MQA/MSFA、需 vendor 现代化
+    timm 层）→ **放弃**；GhostNetV3 用户选择跳过（权重未公开）；
+    MNv3-L/MNv4-S/LSNet-T 权重齐（github release / hf-mirror / HF）。
+  - **实现**（全部过 CPU 冒烟 `tests/test_m66_backbones.py`，7 臂
+    forward/backward × 3 尺寸 + stride 契约 + 预训练覆盖率 ≥95% 断言）：
+    - `lsnet_vendor.py`：LSNet-T vendored（detection 移植版语义），**SKA
+      去 triton 化**（纯 torch ks² 循环等价重写）+ FFN 改分类版命名
+      （pw1/pw2）+ attention bias 运行时 bicubic 插值（多尺度兼容）。
+    - `mnv4.py`：MNv4-Conv-S **按 checkpoint 键名精确复刻**（timm
+      'uir' 解码：a/k/p=start/mid/end dw 核，MNv4-S 全块 ReLU），
+      键位校验 278/278。
+    - `mobile_bb.py`：三骨干统一 d2 Backbone 包装（res3/4/5@8/16/32），
+      `MODEL.MOBILE_BB.{MODEL_NAME,WEIGHTS,INPUT_SIZE}` 一套配置接入。
+    - 参数量实测：mnv3 3.13M / mnv4 3.79M / lsnet 11.07M / vigv2-S
+      7.35M / mv2v2-M 15.85M（+C3K2 零参数差，与 C3 消融设计一致）/
+      r50-BiFPN 23.78M。
+  - **队列接力**：`tools/watch_m66_after_as1.sh`（PID 47848）等 AS1 真实
+    成功标记 → `run_m66_backbone_straw.sh`（7 臂 × ~3.2h ≈ 22h，明晨
+    ~07:00 UTC 完）→ `run_m66_backbone_wheat.sh`（7 臂 × ~1.3h ≈ 9h，
+    明下午 ~16:00 UTC 完）。失败臂标记后不阻塞后续臂。
+  - **汇总出表**：`tools/summarize_backbones.py`（解析最终 eval + 重建
+    模型计参数 + markdown 表 + AP 柱状图 + 参数-AP Pareto 散点图，
+    产物 `output/_figures_m66/`）。收队后跑一次即可。
+  - **M6.5 状态**：AS1（TAL）08:49 UTC 收尾中；组件池仅剩 MQ1/NK1/NK2
+    未试，全负则 M6.5 收官走 Pareto 回退。**M66 队列运行期间禁改
+    `adet/`**（新进程逐臂 import）。
+- **（前史）KD1b 收队 + AS1 运行中（2026-09-08 07:20 UTC 更新）**：
+  - **KD1b 终局：KD 假设关闭（中性）**（09-08 06:40 UTC exit=0）：
+    segm **66.15**（bbox 67.47，APs 44.69/AP75 72.77）vs P0_res(s42)
+    66.06/67.49 → **Δ segm +0.09 / bbox −0.02（噪声内）**。标定修正后
+    蒸馏不再有害（KD1 −0.39 → KD1b +0.09），但**无真实增益信号**，
+    单 seed 0.09 远不及晋级线，3-seed 确认不值得 → **KD 线整线关闭**
+    （V3 蒸馏旗舰路径结束；KD2 mask 蒸馏降级不做）。教师 B=66.35
+    @416 的定位/掩码知识在 512 学生上无可转移增益，学生已到自身上限。
+  - **AS1 全量运行中**（06:42 UTC 由 watcher 自动接棒启动，
+    `tools/run_m65_wave2_as1.sh`，iter ~6400/22k，eta ~1:27，预计
+    ~08:45 UTC 完）。冒烟已过（150 iter + TAL_WARMUP=50，[TAL] 统计
+    存在、损失有限）。TAL 运行时统计健康：pos/gt ~9.0-9.6（topk=10
+    近饱和，candidate 不再限制）、**fallback=0**（每 GT 候选充足）、
+    损失量级与基线一致（total 0.91 / mask 0.113）、峰值 9.6GB、
+    s/iter 0.333（vs P0_res 0.308，正点数↑致 mask ROI 略多，可接受）。
+    **AS1 全量期间禁改 `adet/`。**
   - **P0_res-s2024 完成**（09-07 16:52 UTC）：segm **65.92**（bbox 67.14，
     APs 45.51/AP75 73.30）→ **M2b 三 seed 终判：淘汰**。
     配对 Δ segm = s42 −0.91 / s123 +0.38 / s2024 −0.41（均值 −0.31，t=−0.85
@@ -200,30 +249,9 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
     **BOTTOM_RES 保持 56**；P0_res 三 seed segm 66.06/65.77/65.92（σ≈0.15
     极稳），APs 42.09/49.57/45.51（σ≈3.8——**APs 噪声主源是基线本身**，
     单 seed 小目标结论实证噪声可达 ±13，必须 ≥3 seed）。
-  - **KD1 首轮：标定缺陷，未公平检验**（09-07 19:57 UTC exit=0）：segm
-    65.67（bbox 66.14，APs 35.83/AP75 73.44）vs P0_res(s42) 66.06 →
-    Δ −0.39。**根因**：loss_kd_bases ~13.7（前景像素 MSE×4 bases，无
-    per-basis 归一，blendmask.py `_distill_losses`），W_BASES=1.0 下蒸馏项
-    占总损失 93%，学生实际在"教师 bases 拟合优先"下训练。既不淘汰也
-    不晋级 KD 假设 → KD1b 重跑（类比 DQ1→DQ1b 的协议修正）。
-  - **KD1b 运行中**（09-08 03:35 UTC 启动，`tools/run_m65_wave1f_kd1b.sh`，
-    唯一改动 `MODEL.DISTILL.W_BASES 1.0→0.02`，kd_bases 归一后 ~0.27 与
-    任务损失 0.07~0.6 同量级；预计 ~06:35 UTC 完，~3h。中途 03:53 观察：
-    iter 2159，kd_bases 已从 4.7 衰减到 0.71，任务损失健康）。
-  - **AS1（FCOS-TAL）已实现并通过全部单测**（09-08，`tests/test_m65_as1.py`
-    8 项全过 + `test_m62_components.py` 回归全过 + quick_check 通过）：
-    `MODEL.FCOS.ASSIGN tal`（默认 default，P0 协议与 state_dict 位级不变）；
-    实现 `fcos_outputs.py::_tal_reassign`——候选 = center 域∩FPN range∩GT
-    框内，t=s^α·iou^β（α1/β6），每 GT topk=10（<32² 小目标 k=4），
-    位置冲突取 t 最大 GT，每 GT 保底 1 正点（全局最大 IoU 兜底，冲突
-    后终判），warmup 500 iter 保持默认指派（tal_iter buffer 入 state_dict，
-    旧 ckpt 缺键非致命）。量纲关键：reg_pred 是 stride 归一化单位（推理
-    469 行 r×s 反归一化），TAL 解码/写回均已对齐。
-    **接力链已挂**（`tools/watch_as1_after_kd1b.sh`，PID 13945）：KD1b
-    真实成功标记 → AS1 GPU 冒烟（150 iter，TAL_WARMUP=50 跨过激活，校验
-    [TAL] 统计 + 损失有限）→ `tools/run_m65_wave2_as1.sh` 全量（22k 同
-    P0_res 协议 + ASSIGN tal，单变量）。**AS1 全量期间禁改 `adet/`。**
-    预计 ~10:00 UTC 出终局。
+  - **KD1 首轮（历史）**：标定缺陷未公平检验（09-07 19:57，segm 65.67，
+    loss_kd_bases ~13.7 占总损失 93%）→ 已由 KD1b（W_BASES 0.02）公平
+    重测并关闭，见上。
   - **FPS 基准已实测（M6.4 效率线收账）**：平台 M@512 batch1 =
     **23.5 FPS / 42.5ms / 25.96M 参数 / 0.26GB**；R50-protonet @512 =
     54.6 FPS / 18.3ms / 35.36M。验收线 ≥10 FPS 双达标；平台 0.49× 参数

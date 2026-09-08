@@ -583,8 +583,8 @@ NAS-FPN 搜索、完整 HRFPN、RepViT/EMO backbone 替换。它们会同时改�
 | P0_res-s2024（配对基线） | 65.92 | 67.14 | — | APs 45.51/AP75 73.30。**P0_res 三 seed segm = 66.06/65.77/65.92（σ≈0.15 极稳）；APs = 42.09/49.57/45.51（σ≈3.8，APs 噪声主源是基线本身）** |
 | **M2b 三 seed 终判** | 均值 65.60 | — | **均值 −0.31** | ❌ **淘汰**：配对 Δ segm = −0.91/+0.38/−0.41（t=−0.85，p≈0.50）、Δ APs 均值 −2.55（t=−0.47）→ **BOTTOM_RES 保持 56**；实证 APs 分桶单 seed 噪声可达 ±13，小目标结论必须 ≥3 seed |
 | KD1（B→M 三路蒸馏，W_BASES=1.0） | 65.67 | 66.14 | **−0.39** | ⚠️ **标定缺陷，未公平检验**：loss_kd_bases ~13.7（前景像素 MSE×4 bases 无归一）占总损失 93%，蒸馏项梯度主导训练 → 重跑 KD1b |
-| KD1b（W_BASES=0.02 标定修正） | 运行中 | — | — | wave1f-b；kd_bases 归一后 ~0.27 与任务损失同量级，其余同 KD1。~09-08 06:35 UTC 出终局 |
-| AS1（FCOS-TAL，topk10/small4/α1/β6/warmup500） | 排队 | — | — | wave2；单测全过（`tests/test_m65_as1.py`），watcher 接 KD1b 后自动冒烟+全量。单变量 vs P0_res |
+| KD1b（W_BASES=0.02 标定修正） | **66.15** | 67.47 | **+0.09** | ❌ **KD 线关闭（中性）**：标定修正后无害（KD1 −0.39 → +0.09）但无增益信号，单 seed 噪声内、不及晋级线 → V3 蒸馏旗舰路径结束，KD2 降级不做。教师 B@416 知识对 512 学生无可转移增益 |
+| AS1（FCOS-TAL，topk10/small4/α1/β6/warmup500） | 运行中 | — | — | wave2；06:42 UTC watcher 自动接棒，冒烟已过。TAL 统计健康（pos/gt~9、fallback=0）。~08:45 UTC 出终局。单变量 vs P0_res |
 
 ### M6.5.3 推荐总装版本
 
@@ -703,6 +703,30 @@ V1 quality-aware FCOS
 | Multi-scale neck | [YOLOv9/GELAN](https://github.com/WongKinYiu/YOLOv9) | [Ultralytics](https://github.com/ultralytics/ultralytics) |
 | Spatial scale fusion | [ASFF](https://github.com/GOATmessi8/ASFF) | ASFF official repository |
 | Semi-supervised detection | [Soft Teacher](https://openaccess.thecvf.com/content/ICCV2021/html/Xu_End-to-End_Semi-Supervised_Object_Detection_With_Soft_Teacher_ICCV2021_paper.html) | [SoftTeacher](https://github.com/microsoft/SoftTeacher) |
+
+---
+
+## M6.6 骨干消融（2026-09-08 启动，用户下达）
+
+> 目的：论文骨干选择正当性——在同一 BiFPN(3,160)+ProtoNetV2+GC+FCOS 管线
+> 下横评主流轻量骨干，两数据集（Strawberry 512 22k / wheat_seg_strat 8k），
+> 1-seed(42) 筛选，入围者后补 3 seed。
+
+| 臂 | 骨干参数(M) | 实现 | 权重 |
+| --- | ---: | --- | --- |
+| R50+BiFPN（同颈对照） | 23.78 | 已有 `build_fcos_resnet_bifpn_backbone` | R-50.pkl |
+| vigv2-S+C3K2 | 7.35 | cspvigv2（VERSION s） | MobileViG_V2_S |
+| MobileViGv2-S/M（无 C3K2） | 7.35 / 15.85 | cspvigv2（USE_C3K2 False） | 同上 |
+| MobileNetV3-L | 3.13 | timm 0.6.12 原生（`mobile_bb.py` 包装） | mnv3_large_100_ra IN-1k |
+| MobileNetV4-Conv-S | 3.79 | **键名精确复刻**（`mnv4.py`） | mnv4_conv_small.e2400 IN-1k |
+| LSNet-T | 11.07 | vendored（`lsnet_vendor.py`，SKA 纯 torch 重写） | lsnet_t IN-1k |
+
+- **排除**：MobileNetV5（仅 Gemma-3n 权重非 IN-1k，需 vendor 现代 timm）、
+  GhostNetV3（checkpoint 未公开，用户跳过）。
+- 队列：`tools/watch_m66_after_as1.sh` 接 AS1 → straw 7 臂 → wheat 7 臂
+  （预计 09-09 16:00 UTC 全收）；失败臂不阻塞。
+- 汇总：`tools/summarize_backbones.py` → 表 + AP 柱状图 + 参数-AP Pareto
+  图（`output/_figures_m66/`）。冒烟：`tests/test_m66_backbones.py`。
 
 ---
 
