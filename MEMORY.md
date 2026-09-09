@@ -193,6 +193,13 @@ server.py 6.9GB 拖累）→ 已降 **batch6 / LR 0.00375**（线性缩放）重
     65.15/66.14/65.51（均值 65.60，vs P0_res 已知 66.06/65.77 均值 65.92
     → 至少 −0.3，无正向总分趋势）。
 - **（2026-09-09 10:30 UTC）M6.6 骨干消融全部收队（14/14 exit=0）**：
+- **（当前）M66b：vigv2-S+C3K2 3-seed 确认轮运行中（09-09 13:13 UTC 启动）**：
+  `tools/run_m66b_seed.sh`，6 组串行——wheat 4 组（vigv2s s123/s2024 +
+  **P0-M 配对基线 s123/s2024**，各 ~1h）→ straw 2 组（vigv2s s123/s2024，
+  各 ~1.9h）。配对判定：wheat vs P0-M 同 seed；straw vs P0_res
+  （66.06/65.77/65.92 已在库）。s42 侧已有：m66 wheat vigv2s 16.20 /
+  P0-M 15.71；m66 straw vigv2s 65.87。预计 **09-10 ~01:00 UTC 全收**，
+  收队后做 3-seed 配对 t 检验判定 S 旗舰晋级与否。
   完整表+图已产出（`output/_figures_m66/{table,bar,pareto}_{straw,wheat}`，
   `tools/summarize_backbones.py` 一键重建）。终局数字（均为 seed42 单轮）：
 
