@@ -78,9 +78,9 @@ if ! grep -q "M66_${tag}_DONE exit=0" "$MARK" 2>/dev/null; then
 fi
 
 # 2) vigv2 家族
-runvig vigv2s    s m True  weights/MobileViG_V2_S_Class.pth
-runvig mvigv2s   s m False weights/MobileViG_V2_S_Class.pth
-runvig mvigv2m   m m False weights/MobileViG_V2_M_Class.pth
+runvig vigv2s    s True  weights/MobileViG_V2_S_Class.pth
+runvig mvigv2s   s False weights/MobileViG_V2_S_Class.pth
+runvig mvigv2m   m False weights/MobileViG_V2_M_Class.pth
 
 # 3) 第三方轻量骨干
 run mnv3l  mnv3_l  weights/mobilenetv3_large_100_ra_in1k.pth
