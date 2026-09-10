@@ -728,7 +728,7 @@ V1 quality-aware FCOS
 - 汇总：`tools/summarize_backbones.py` → 表 + AP 柱状图 + 参数-AP Pareto
   图（`output/_figures_m66/`）。冒烟：`tests/test_m66_backbones.py`。
 
-### M6.6 结果（2026-09-09 收队，14/14 exit=0，seed42 单轮）
+### M6.6 结果（2026-09-09 收队 14/14；09-10 M66b 3-seed 终判补全）
 
 | 骨干 | straw segm（Δ vs P0） | wheat segm（Δ vs P0） | 总参数(M) |
 | --- | ---: | ---: | ---: |
@@ -743,8 +743,12 @@ V1 quality-aware FCOS
 | LSNet-T | 58.86（−7.20） | 11.20（−4.51） | 21.15 |
 
 **要点**：
-1. **vigv2-S+C3K2 是 wheat 全场最高**（+2.33 vs R1），straw 持平 P0（噪声内），
-   总参数 0.67× P0 → 轻量旗舰候选（晋级需 3 seed 配对，待决策）。
+1. ~~vigv2-S+C3K2 是 wheat 单轮最高（16.20），轻量旗舰候选~~ → **3-seed
+   终判淘汰（M66b，09-10）**：配对 Δ wheat = +0.49/−2.35/−1.75（均值
+   −1.20）、straw = −0.19/−1.14/−0.56（均值 −0.63），三 seed 全同号为负，
+   且 S 的 seed 稳定性显著差（wheat σ 1.62 vs M 0.21）——seed42 优势是
+   单 seed 噪声。**旗舰保持 vigv2-M+C3K2（两数据集 3-seed 稳定：
+   wheat 15.71/15.37/15.78、straw 66.06/65.77/65.92）**。
 2. C3K2 分解：wheat M +0.56 / S +0.52 稳定正；straw M +1.17 / S +0.07。
 3. 第三方骨干全线落后（straw −5.6~−7.2；wheat 最优 MNv3-L 14.70 仍差
    vigv2 家族 ≥1.0）——图骨干在小数据高分辨率任务优势压倒性。
