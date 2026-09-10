@@ -8,14 +8,19 @@ GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMa
 
 项目针对农业病害数据集规模小、类别与尺度不均衡、通用大模型训练和终端部署成本高的问题，
 从 BlendMask 的 **backbone、neck、FCOS 检测头和 basis/mask 分支**进行可归因的轻量化改造。
-当前主线使用带 ImageNet 预训练的 **MobileViGv2-S/M + C3K2**，在低于 R50 的模型规模下
-研究图卷积、多尺度融合和掩膜细节建模；目标不是堆叠 Transformer 类大模型，而是在低算力
-终端上取得更好的精度-参数量-速度平衡。
+当前主线使用带 ImageNet 预训练的 **MobileViGv2-M + C3K2 + BiFPN + ProtoNetV2**，
+在约为官方 R50 基线 0.73× 参数、0.63× FLOPs 的规模下研究图卷积、多尺度融合与掩膜细节建模；
+目标不是堆叠 Transformer 类大模型，而是在低算力终端上取得更好的精度-参数量-速度平衡。
+
+> **上游**：AdelaiDet v0.2.0（BlendMask）+ Detectron2 v0.6
+> **主要改动目录**：`adet/modeling/blendmask/`、`adet/modeling/backbone/`
 
 ### 研究目标与比较口径
 
 - **论文主模型**：优先从 MobileViGv2-S/M 中选择，完整模型参数量不超过官方
   BlendMask-R50，并报告 segm AP、参数量、FLOPs、峰值显存、延迟和 FPS。
+  （M6.6b 三 seed 配对后**选定 M 变体**：S 变体在 wheat 的单轮优势被复验证伪，
+  且 seed 稳定性显著更差；详见 REPORT.md 第 3.4 节。）
 - **性能目标**：在同数据、同训练日程、同随机种子下稳定优于官方 BlendMask-R50；绝对
   `+5 AP` 是项目冲刺目标，不以无条件扩大模型为代价。
 - **统计要求**：最终结论采用 seeds `{42,123,2024}`，要求增益方向一致并进行配对 t 检验。
@@ -24,17 +29,38 @@ GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMa
 - **容量上限组**：MobileViGv2-B 只用于观察更大容量的性能上限，不作为轻量架构优于
   ResNet50 的核心证据，也不自动成为最终部署模型。
 
-当前统一 wheat 协议下，完整 `MobileViGv2-M + C3K2 + BiFPN + ProtoNetV2` 约 25.97M
-参数，官方 BlendMask-R50 为 35.37M；当前干净数据集单 seed segm AP 为 16.93 vs 15.00。该结果说明
-轻量路线有潜力，但正式论文结论仍需多 seed、跨数据集及效率指标确认。
+---
 
-> **上游**：AdelaiDet v0.2.0（BlendMask）+ Detectron2 v0.6
-> **主要改动目录**：`adet/modeling/blendmask/`、`adet/modeling/backbone/`
+## 实验报告与当前结果
+
+> 完整数据、图表与方法学讨论见 **[实验综合报告 REPORT.md](REPORT.md)**；
+> 历史消融见 [ABLATION_RESULTS.md](ABLATION_RESULTS.md)，工作记忆见 [MEMORY.md](MEMORY.md)。
+
+**旗舰平台**：`MobileViGv2-M + C3K2 + BiFPN(3,160) + ProtoNetV2 + GC`
+（约 **25.96M** 参数，官方 BlendMask-R50 为 35.36M）。已完成两条实验主线的
+全部组件检验（M6.5 深度改造、M6.6 骨干消融，含三 seed 配对复验）：
+
+| 数据集（统一协议） | 平台 segm AP | R50+FPN 官方锚点 | Δ vs R50 | R50+BiFPN 同颈对照 |
+| --- | ---: | ---: | ---: | ---: |
+| Strawberry 512（512 输入，22k iter） | **66.06** | 63.68 | **+2.38** | 65.29 |
+| wheat_seg_strat（8000 iter） | **15.71** | 13.87 | **+1.84** | 13.98 |
+
+- **效率**：参数量 0.73×、FLOPs 0.63×（官方 R50 = 35.36M / 56.15G@512），
+  推理 **23.5 FPS**（batch=1@512，RTX 3090，≥10 FPS 验收线达标），
+  三 seed 配对（seeds 42/123/2024）方向一致为正。
+- **绝对 `+5 AP` 冲刺目标**经完整组件池（QFL / HQ detail / 边界损失 /
+  高分辨率 mask / 蒸馏 / FCOS-TAL）与骨干池（9 配置）检验后确认不可达
+  （两数据集缺口 2.6~3.2，Plantv2 顶格）。项目最终定位为 **Pareto 主结果**
+  ——以更低参数/算力取得稳定优于官方 R50 的精度。
+- **骨干横评结论**：MobileNetV3-L、MobileNetV4-Conv-S、LSNet-T 等主流
+  轻量骨干在两数据集上均显著落后本平台（Strawberry 相差 5.6~7.2 AP），
+  图卷积（MobileViGv2）骨架在小数据高分辨率任务上优势结构性且稳定。
 
 ---
 
 ## 目录
 
+- [实验报告与当前结果](#实验报告与当前结果)
 - [1. 改动总览](#1-改动总览)
 - [2. Backbone 侧改动](#2-backbone-侧改动)
 - [3. BlendMask 侧改动](#3-blendmask-侧改动)
@@ -56,9 +82,14 @@ adet/modeling/
 │   ├── cspvig.py            ★ 新增  Vision GNN（MobileViG）图卷积骨干（旧版对照）
 │   ├── cspvigv2.py          ★ 新增  MobileViGv2 + C3K2（S/M 轻量主线，B 容量上限）
 │   ├── Lcspvig.py           ★ 新增  cspvig 变体 + LSKblock 大核选择注意力
-│   ├── bifpn.py             ▲ 修改  接入 ViG/ViGv2 的 BiFPN（保持 p3~p7 接口）
+│   ├── mobile_bb.py         ★ 新增  M6.6 第三方轻量骨干统一接入（MNv3/MNv4/LSNet + BiFPN）
+│   ├── mnv4.py              ★ 新增  MobileNetV4-Conv-S（按 timm checkpoint 键名精确复刻）
+│   ├── lsnet_vendor.py      ★ 新增  LSNet-T（CVPR2025，SKA 纯 torch 重写）
+│   ├── bifpn.py             ▲ 修改  接入 ViG/ViGv2 的 BiFPN（保持 p3~p7 接口；res2 透传）
 │   ├── __init__.py          ▲ 修改  导出新增的 BiFPN builder
 │   └── fpn.py dla.py vovnet.py mobilenet.py resnet_lpf.py resnet_interval.py lpf.py   （官方原样）
+├── fcos/
+│   └── fcos_outputs.py      ▲ 修改  QFL 分类目标 + AS1 任务对齐指派（TAL，默认关闭）
 └── blendmask/
     ├── basis_module2.py     ★ 新增  改进版 ProtoNetV2（低层特征 + 注意力融合 + FDC 损失）
     ├── fdc_loss.py          ★ 新增  Focal-Dice-CrossEntropy 混合分割损失
@@ -66,7 +97,9 @@ adet/modeling/
     ├── cbam.py              ★ 新增  CBAM 注意力（被 ATTN="cbam" 使用）
     ├── ca.py                ★ 新增  Coordinate Attention（被 ATTN="ca" 使用，已改为支持动态分辨率）
     ├── blendmask2.py        ★ 新增  BlendMask2（已改为继承自 BlendMask 的兼容别名）
-    └── basis_module.py blender.py blendmask.py                                        （官方原样）
+    ├── blendmask.py         ▲ 修改  M6.5：KD 蒸馏损失（默认关）、HQ detail 分支（默认关）
+    ├── blender.py           ▲ 修改  M6.5：BR1-lite 边界加权 BCE（默认关）
+    └── basis_module.py                                                          （官方原样）
 ```
 
 ★ = 本项目新增 ；▲ = 在官方文件上修改 ；无标记 = 与官方一致
@@ -81,9 +114,16 @@ adet/modeling/
 | `MODEL.VIG.USE_LSK` | `True` | 是否在 Lcspvig 的 transition 层启用 LSK |
 | `MODEL.VIG.VERSION` | `s` | MobileViGv2 变体：`ti`/`s`/`m`/`b`；S/M 为轻量主线，B 为容量上限 |
 | `MODEL.VIG.PRETRAINED` | `""` | MobileViGv2 ImageNet 分类预训练权重 |
+| `MODEL.VIG.USE_C3K2` | `True` | 是否启用 C3K2（C2f 风格）多分支融合；`False`=原始 MobileViGv2 串行 |
 | `MODEL.BASIS_MODULE.ATTN` | `"gc"` | basis 内部注意力类型：`none`/`gc`/`cbam`/`ca` |
 | `MODEL.BASIS_MODULE.LOW_LEVEL_DIM` | `24` | `ProtoNetV2` 低层细节分支通道数 |
 | `MODEL.FCOS.BOX_QUALITY` | `"ctrness"` | FCOS 质量分支：`ctrness` 或 `iou` |
+| `MODEL.MOBILE_BB.*` | 空 | M6.6 第三方骨干：`MODEL_NAME`(`mnv3_l`/`mnv4_s`/`lsnet_t`)、`WEIGHTS`、`INPUT_SIZE` |
+| `MODEL.FCOS.ASSIGN` / `TAL_*` | `"default"` | M6.5 任务对齐指派（AS1，默认关闭，另见 `TAL_TOPK/ALPHA/BETA/WARMUP`） |
+| `MODEL.BLENDMASK.BOUNDARY_LOSS_WEIGHT` / `BOUNDARY_KERNEL` | `0.0` / `3` | M6.5 边界加权 mask BCE（默认关闭） |
+| `MODEL.BASIS_MODULE.DETAIL_ON` / `DETAIL_SOURCE` | `False` / — | M6.5 HQ detail 分支（默认关闭；需 `MODEL.BiFPN.PASSTHROUGH`） |
+| `MODEL.DISTILL.WEIGHTS` / `W_CLS/W_REG/W_BASES` | `""` / `1/0.25/1` | M6.5 检测+mask 蒸馏（默认关闭） |
+| `MODEL.BLENDMASK.BOTTOM_RESOLUTION` | `56` | mask ROI 分辨率（M2b 曾试 64，三 seed 后维持 56） |
 
 ---
 
@@ -146,6 +186,28 @@ BiFPN 部分（`SingleBiFPN` / `BiFPN` / `BackboneWithTopLevels`）保留 BlendM
 多尺度接口，并支持 ViGv2 的不同输入通道：可学习的 fast-normalized 融合权重 + `swish`
 激活 + 3×3 卷积，重复 `MODEL.BiFPN.NUM_REPEATS` 次。后续轻量 PAFPN/GELAN-like neck
 必须保持相同的 `p3~p7`、通道和 stride 接口，才能进行可归因比较。
+
+### 2.4 `mobile_bb.py` —— M6.6 第三方轻量骨干接入（新增）
+
+为骨干横评（M6.6）新增统一接入层，把三类主流轻量骨干包装成 detectron2
+`Backbone`，输出与 cspvigv2 一致的 `res3/res4/res5`（stride 8/16/32），
+可直接挂在同一个 BiFPN(3,160) + ProtoNetV2 + GC 管线下做单变量比较：
+
+| `MODEL.MOBILE_BB.MODEL_NAME` | 骨干 | 实现来源 | 预训练 |
+| --- | --- | --- | --- |
+| `mnv3_l` | MobileNetV3-Large | 本地 timm 0.6.12 原生（`features_only`） | `mobilenetv3_large_100_ra`（IN-1k） |
+| `mnv4_s` | MobileNetV4-Conv-Small | `mnv4.py` 按 timm checkpoint **键名精确复刻**（278/278 键位校验） | `mobilenetv4_conv_small.e2400`（IN-1k） |
+| `lsnet_t` | LSNet-T（CVPR2025） | `lsnet_vendor.py`（detection 移植版；**SKA 去 triton 化为纯 torch**、attention bias 运行时 bicubic 插值） | `lsnet_t`（IN-1k） |
+
+- 权重加载为「宽容加载 + 覆盖率断言」：允许 head/classifier 多余键，
+  但骨干体必须 ≥95% 命中，防止映射错误静默漏载。
+- 注册 `build_mobile_bb_backbone`（仅骨干）与
+  `build_fcos_mobile_bb_bifpn_backbone`（+BiFPN），由
+  `MODEL.MOBILE_BB.{MODEL_NAME,WEIGHTS,INPUT_SIZE}` 切换。
+- 排除项：MobileNetV5（官方仅发布 Gemma-3n encoder 权重，非 ImageNet-1k）、
+  GhostNetV3（checkpoint 未公开）。
+- 冒烟测试：`tests/test_m66_backbones.py`（构建/前反向 × 3 输入尺寸 +
+  stride 契约 + 预训练覆盖率断言，CPU 可跑）。
 
 ---
 
@@ -380,6 +442,24 @@ cudnn.benchmark 修复只能消除其中一部分）。
 | `ca.py` | `CA_Block`，Coordinate Attention | **已使用**（`ATTN=ca`，已改为支持动态分辨率） |
 | `spatial_attn.py` | `SpatialAttention`，纯空间注意力 | **已使用**（`ATTN=spatial`，与 `gc` 构成对照） |
 | `fdc_loss.py` | `DC_and_CE_loss`（Focal-Dice-CE）、`SoftDiceLoss`、`CrossentropyND` | **已使用**（ProtoNetV2 的语义损失，见 3.3；实测在本数据集有害） |
+
+### 3.9 M6.5 深度改造组件（已实现，实测后全部保持默认关闭）
+
+在正式回归到平台基线前，M6.5 依次实现了六类深度改造并逐一做单变量检验。
+**结论是六项全部未通过晋级判定**，因此代码保留但配置默认关闭（`P0` 协议与
+state_dict 位级不变），详细数据见 [REPORT.md](REPORT.md) 第 2 节：
+
+| 组件 | 改造点 | 配置键（默认） | 终局 |
+| --- | --- | --- | --- |
+| QFL | 分类目标改为 detached box IoU quality | `MODEL.FCOS.CLS_LOSS="focal"`（`"qfl"` 可选） | ❌ −0.83 |
+| HQ1 | res2 高分辨率 detail 分支 concat 进 basis tower | `MODEL.BASIS_MODULE.DETAIL_ON=False` | ❌ −0.63（架构根因） |
+| BR1-lite | GT 形态学边界带 mask BCE 加权 ×(1+λ) | `MODEL.BLENDMASK.BOUNDARY_LOSS_WEIGHT=0.0` | ❌ −0.56（AP75 反向） |
+| M2b | mask ROI 训练目标 56→64 | `MODEL.BLENDMASK.BOTTOM_RESOLUTION=56` | ❌ 三 seed 配对后维持 56 |
+| KD1 | 检测+mask 三路蒸馏（teacher 冻结） | `MODEL.DISTILL.WEIGHTS=""`（`W_CLS/W_REG/W_BASES`） | ❌ 标定修正后 +0.09 无增益 |
+| AS1 | FCOS-TAL 任务对齐正样本指派 | `MODEL.FCOS.ASSIGN="default"`（`"tal"` 可选） | ❌ −0.74 |
+
+其中 M2b（APs 分桶单 seed 噪声）与 KD1（标定缺陷）各经历**两轮**才完成公平
+检验，是项目关于「单 seed 判定风险」与「损失标定量级」的两份方法学实证。
 
 ---
 
@@ -841,29 +921,29 @@ OMP_NUM_THREADS=1 python tools/train_bl+.py --config-file configs/run-wheat-seg.
 
 ## 9. 优化建议
 
-### 当前论文研发路线
+### 当前论文研发路线（2026-09 定稿）
 
-后续候选不再以“增加更多注意力模块”为主，而按以下正交路线筛选：
+M6.5（深度改造）与 M6.6（骨干消融）两条主线均已完成，绝对 `+5 AP` 冲刺
+目标经完整组件池与骨干池检验后确认不可达，项目转为 **Pareto 定位**。论文
+主结果与候选方向如下：
 
-| 路线 | 候选 | 定位 |
+| 路线 | 状态 | 定位 |
 | --- | --- | --- |
-| Backbone | MobileViGv2-S/M + C3K2 | 论文主线，证明参数效率与部署价值 |
-| Backbone 上限 | MobileViGv2-B | 容量上限探索，不用于单独证明架构优势 |
-| Neck | 当前 BiFPN；轻量 PAFPN/GELAN-like 对照 | 保持 `p3~p7` 与 FCOS/BlendMask 接口，先在 M 上单变量比较 |
-| FCOS | `BOX_QUALITY=iou`；必要时 `moving_fg` | 低风险质量建模，不同时改 head 结构 |
-| Mask | BCE + 小权重 Dice；`BOTTOM_RESOLUTION=64` | 关注小病斑与边界，记录 AP75、显存和速度 |
-| Schedule | 提前衰减、延长训练、cosine | 零参数成本，优先于结构扩张 |
-| Inference | 448/512/640 单尺度与有限 TTA | 单独报告 FPS，不用慢速 TTA 替代部署结果 |
+| Backbone 主比较 | ✅ 完成（3 seed） | MobileViGv2-M+C3K2 vs R50：Strawberry +2.38 / wheat +1.84 |
+| Backbone 横评 | ✅ 完成（9 配置 × 2 数据集） | 论证骨干选择正当性（MNv3/MNv4/LSNet 均显著落后） |
+| Neck | ✅ 完成（R50+BiFPN 同颈对照） | 量化颈/骨干贡献分解（Strawberry 约 1/3 : 2/3） |
+| FCOS / Mask 深度改造 | ✅ 完成（六项全负，默认关闭） | 负结果与方法学讨论（QFL/HQ/边界/高分辨率/蒸馏/TAL） |
+| Schedule | ⚠️ 部分（D3 cosine 未过线） | 零参数成本，历史记录保留 |
+| Inference | ⏳ 未做（可选） | 有限 TTA 作为附加增益，单独报告 FPS |
 
-GELAN 不是当前代码中可直接替换的现成 neck。若实现，只借鉴多路径梯度流与 concat 聚合，
-输出必须继续满足 `p3~p7`、统一通道和 stride `[8,16,32,64,128]`。首轮不得同时组合
-MobileViGv2-B、GELAN-like neck 和改进 FCOS，否则无法判断收益来源。
+论文结果建议分为：
 
-论文结果建议分为三张表：
+1. **主表**：R50+FPN 官方 vs 平台，两数据集 3 seed 配对（segm AP / 参数 / FLOPs / FPS）；
+2. **副表 1**：骨干横评（9 配置 × 2 数据集，含 MobileNetV3/V4、LSNet 对照）；
+3. **副表 2**：M6.5 单变量消融（六项负结果）+ 方法学讨论（单 seed 风险、
+   APs 分桶噪声测量）。
 
-1. R50 与 MobileViGv2-S/M 的精度-效率主比较；
-2. 固定 MobileViGv2-M 的 backbone/neck/FCOS/mask 单变量消融；
-3. MobileViGv2-B 的容量扩展结果。
+完整图表与数据见 [REPORT.md](REPORT.md)。
 
 ### 已完成
 
@@ -922,6 +1002,10 @@ MobileViGv2-B、GELAN-like neck 和改进 FCOS，否则无法判断收益来源�
 - [GCNet](https://arxiv.org/abs/1904.14294) —— 全局上下文块
 - [CBAM](https://arxiv.org/abs/1807.06521)、[Coordinate Attention](https://arxiv.org/abs/2103.02907)、[LSKNet](https://arxiv.org/abs/2303.09030) —— 注意力模块
 - [nnUNet](https://github.com/MIC-DKFZ/nnUNet) —— Dice / ND-Crossentropy 损失实现
+- [timm](https://github.com/huggingface/pytorch-image-models) —— MobileNetV3 实现与预训练权重
+- [MobileNetV4](https://arxiv.org/abs/2404.10518) —— 骨干消融对照（键名精确复刻 timm checkpoint）
+- [LSNet (CVPR 2025)](https://arxiv.org/abs/2503.23135) / [THU-MIG/lsnet](https://github.com/THU-MIG/lsnet) —— 骨干消融对照（SKA 纯 torch 重写）
+- [GFL](https://arxiv.org/abs/2006.04388)（QFL）、[TOOD](https://arxiv.org/abs/2108.07755)（TAL）—— M6.5 组件来源（留档）
 
 ```BibTeX
 @inproceedings{chen2020blendmask,
