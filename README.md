@@ -104,8 +104,6 @@ adet/modeling/
 
 ★ = 本项目新增 ；▲ = 在官方文件上修改 ；无标记 = 与官方一致
 
-已删除的死代码：`blendmask/build.py`、`dice_loss.py`、`ND_Crossentropy.py`、`torch-stat.py`、
-`simam_module`（`fdc_loss.py` 已自带所需实现，其余全仓库无引用）。
 
 **本项目新增的配置节点**（`adet/config/defaults.py`）：
 
@@ -168,7 +166,7 @@ adet/modeling/
 - `LSKblock`（LSKNet 风格）：`DW 5×5` → `DW 7×7(dilation=3)` 两条大核分支，各自 1×1 降维后按通道做 **avg / max 拼接 → 7×7 → sigmoid** 得到空间选择权重，加权融合后 1×1 还原，最后 `x * attn`。
 - `BN_LSKb_act`：把 `LSKblock` 嵌进 `Conv-BN-Hardswish`。
 
-> ⚠️ **当前 `BN_LSKb_act` / `LSKblock` 并没有被 `MobileViG.forward` 调用**，也就是说这个文件的"L"（Large-kernel）部分实际未生效，
+
 > `Lcspvig` 目前与 `cspvig` 行为等价。详见 [第 8 节](#8-已知问题)。
 
 ### 2.3 `bifpn.py` —— 接入 ViG 骨干（修改）
