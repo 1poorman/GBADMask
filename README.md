@@ -55,6 +55,20 @@ GBADMask 是在 [AdelaiDet](https://github.com/aim-uofa/AdelaiDet) 的 **BlendMa
 - **骨干横评结论**：MobileNetV3-L、MobileNetV4-Conv-S、LSNet-T 等主流
   轻量骨干在两数据集上均显著落后本平台（Strawberry 相差 5.6~7.2 AP），
   图卷积（MobileViGv2）骨架在小数据高分辨率任务上优势结构性且稳定。
+- **外部模型对照（Plantv2 / PLS，跨框架参考）**：新增第三方骨干
+  [GTR-S](https://github.com/Intellindust-AI-Lab/GTR)（门控线性注意力，12.1M）
+  在 PLS 上的**检测口径**结果（详见 [2.5 节](#25-gtr--外部骨干跨框架参考未接入本仓库)）：
+
+| 模型（Plantv2 / PLS） | 参数量 | bbox AP | segm AP | 说明 |
+| --- | ---: | ---: | ---: | --- |
+| R1_res（MobileViGv2-M+C3K2+BiFPN+ProtoNetV2） | 25.96M | 98.88 | 97.41 | 本平台旗舰（R1 组） |
+| P0（官方 BlendMask-R50+FPN） | 35.36M | 98.45 | 96.07 | 官方基线锚点 |
+| **GTR-S（外部，未接入本仓库）** | **12.1M** | **98.95** | — | 仅检测口径，无 mask 分支；单 seed |
+
+> ⚠️ GTR-S 一行**不可与上面两行直接横向比较**：它来自另一个代码库（GTR，PyTorch +
+> RT-DETR 式检测头），输入 384（本平台 256/320）、训练 6 epoch（本平台 100k iter）、
+> 单 seed、且未训练 mask 分支。该行的作用是佐证 **PLS 在 bbox 口径上已顶格 ≈99**
+> 这一判断在第三方检测器上同样成立，不作为本平台相对 GTR 的优劣证据。
 
 ---
 
@@ -206,6 +220,49 @@ BiFPN 部分（`SingleBiFPN` / `BiFPN` / `BackboneWithTopLevels`）保留 BlendM
   GhostNetV3（checkpoint 未公开）。
 - 冒烟测试：`tests/test_m66_backbones.py`（构建/前反向 × 3 输入尺寸 +
   stride 契约 + 预训练覆盖率断言，CPU 可跑）。
+
+### 2.5 GTR —— 外部骨干（跨框架参考，未接入本仓库）
+
+[GTR](https://github.com/Intellindust-AI-Lab/GTR)（Gated Token Recurrence）是 softmax-free 的
+门控线性注意力骨干，GTR-S 仅 **12.1M** 参数（COCO 检测 53.6 AP）。本轮把它作为**跨框架外部
+对照**纳入比较，**没有**接入 `adet`（不做 `res3/res4/res5` 契约改写，也不参与本节消融）：
+
+- **数据**：Plantv2 / PLS，与本项目同一份数据（16 类，7916 train / 2024 val）；
+  GTR 侧需要 0-based 连续类别 id，标注由 `instances_*.json` 转换后使用。
+- **设置**：GTR-S + Objects365 预训练权重微调，384×384 输入，bf16 AMP，
+  micro-batch 8，6 epoch，单卡 RTX 3060 Laptop（6 GB）。
+- **结果**：bbox AP **98.95**（AP50 99.9 / AP75 99.8）；本轮未训练 mask 分支，**无 segm AP**。
+- **复现命令**（在 GTR 仓库内执行，非本仓库）：
+
+```bash
+conda activate gtr
+cd ~/Projects/GTR
+CONFIG=configs/det/plant_finetune/gtr_s_plantv2.yml \
+OUTPUT_DIR=outputs/plantv2_det_finetune/gtr_s \
+CUDA_VISIBLE_DEVICES=0 ./train.sh \
+    -t weights/obj365/gtr_s_obj365.pth --use-amp -u epochs=6 print_freq=100
+```
+
+**结论**：与 MEMORY.md / ROADMAP.md 中「Plantv2 顶格 ~99」一致——第三方检测器在该数据集上
+同样顶格（98.95 vs 平台 98.88、R50 98.45，差异均在数据饱和噪声内）。这进一步支持
+「Plantv2 不适合作为 +5 AP 主张数据集」的判断；若将来要把 GTR 真正纳入本项目的骨干横评，
+需先按 2.4 的 `MOBILE_BB` 契约包装（输出 stride 8/16/32 的 res3~res5）并接入同一
+BiFPN + ProtoNetV2 管线，届时才是可归因的单变量比较。
+
+**同框架移植尝试（2026-10-05，已暂停，未产出结果）**：曾尝试把 GTR 骨干真正接进本项目
+（同颈同头同协议），做到一半暂停，此处记录进度以免重复踩坑：
+
+| 步骤 | 状态 |
+| --- | --- |
+| conda 环境 `gbadmask`（py3.9 + torch 2.0.1+cu117 + requirements.txt，CUDA 可用） | ✅ 已完成 |
+| `nvcc 11.7` + `gcc ≤11`（CUDA 11.7 的 nvcc 不支持 gcc 15） | ❌ 未解决：conda-forge 下载超时；可用 `sudo apt install gcc-11 g++-11` + `pip install nvidia-cuda-nvcc-cu11==11.7.99` 绕过 |
+| 源码编译 detectron2 v0.6 + `adet._C` | ⬜ 未开始（依赖上一行） |
+| GTR 骨干移植（搬 `vit_adapter*.py`，`fla` 换成纯 torch 实现） | ⬜ 未开始；方案已定：参数名保持 1:1 以便直载权重，GLA 用 chunkwise 形式 `h_t = h_{t-1}·exp(gk_t) + k_t v_tᵀ`、`scale=K^-0.5`（与 `fla/ops/gla/naive.py` 对齐） |
+| 训练 | ⬜ 未开始；本机为 6 GB RTX 3060 Laptop，`run-plantv2.yaml` 的 100k iter × 3 seed 不可行，需缩短日程或换 3090 机器 |
+
+⚠️ 即便移植成功仍有一项**无法消除**的混淆：GTR 无公开的 ImageNet-1k 预训练权重，只能使用
+Objects365 检测预训练，而 R50 / MNv3 / MNv4 / LSNet 均为 IN-1k。因此该组最多做到
+「同框架、同颈、同头、同协议」，预训练口径差异必须在表中披露。
 
 ---
 
